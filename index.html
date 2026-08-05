@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Escala de Serviço Extra</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0d141f;
+    --panel:#16202e;
+    --panel-2:#1c2a3c;
+    --border:#25384d;
+    --text:#e9eef4;
+    --muted:#8a9bb0;
+    --amber:#e8a33d;
+    --amber-dim:#3a2e18;
+    --green:#34d399;
+    --green-dim:#12291f;
+    --red:#ef5757;
+    --red-dim:#331818;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;-webkit-font-smoothing:antialiased;}
+  .wrap{max-width:720px;margin:0 auto;padding:0 16px 64px;}
+
+  header{padding:28px 16px 18px;text-align:center;position:relative;}
+  header .eyebrow{font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:.18em;color:var(--amber);text-transform:uppercase;}
+  header h1{font-family:'Oswald',sans-serif;font-weight:600;font-size:26px;letter-spacing:.02em;margin:6px 0 0;text-transform:uppercase;}
+  .stripe{height:4px;margin-top:16px;background:repeating-linear-gradient(45deg,var(--amber) 0 10px,transparent 10px 20px);opacity:.55;}
+
+  nav.tabs{display:flex;gap:4px;margin:20px 0 18px;background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:4px;}
+  nav.tabs button{flex:1;padding:10px 8px;background:transparent;border:none;color:var(--muted);font-family:'Oswald',sans-serif;font-size:14px;letter-spacing:.04em;text-transform:uppercase;border-radius:7px;cursor:pointer;transition:.15s;}
+  nav.tabs button.active{background:var(--panel-2);color:var(--amber);}
+
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:14px;}
+  .shift-card{display:flex;gap:14px;}
+  .shift-date{font-family:'Oswald',sans-serif;text-align:center;min-width:58px;background:var(--panel-2);border-radius:8px;padding:8px 4px;height:fit-content;}
+  .shift-date .dow{font-size:10px;letter-spacing:.08em;color:var(--muted);text-transform:uppercase;}
+  .shift-date .dnum{font-size:22px;font-weight:600;line-height:1.1;}
+  .shift-date .mon{font-size:10px;color:var(--muted);text-transform:uppercase;}
+  .shift-body{flex:1;min-width:0;}
+  .shift-time{font-family:'JetBrains Mono',monospace;font-size:15px;color:var(--amber);}
+  .shift-local{font-size:13px;color:var(--muted);margin-top:2px;}
+  .shift-meta{display:flex;justify-content:space-between;align-items:center;margin-top:10px;}
+  .vagas-badge{font-family:'JetBrains Mono',monospace;font-size:12px;padding:3px 9px;border-radius:20px;}
+  .vagas-badge.open{background:var(--green-dim);color:var(--green);}
+  .vagas-badge.full{background:var(--red-dim);color:var(--red);}
+  .names{margin-top:10px;font-size:13px;color:var(--muted);line-height:1.6;}
+  .names b{color:var(--text);font-weight:500;}
+  .name-chip{display:inline-flex;align-items:center;gap:6px;background:var(--panel-2);border:1px solid var(--border);padding:3px 8px 3px 10px;border-radius:20px;margin:2px 4px 2px 0;font-size:12.5px;}
+  .name-chip button{background:none;border:none;color:var(--red);cursor:pointer;font-size:13px;padding:0;line-height:1;}
+
+  .btn{font-family:'Oswald',sans-serif;text-transform:uppercase;letter-spacing:.04em;font-size:13px;border:none;border-radius:8px;padding:10px 14px;cursor:pointer;transition:.15s;}
+  .btn-primary{background:var(--amber);color:#1a1204;}
+  .btn-primary:hover{filter:brightness(1.08);}
+  .btn-primary:disabled{background:var(--panel-2);color:var(--muted);cursor:not-allowed;}
+  .btn-ghost{background:transparent;border:1px solid var(--border);color:var(--text);}
+  .btn-danger{background:var(--red-dim);color:var(--red);border:1px solid #4a2222;}
+  .btn-block{width:100%;margin-top:12px;}
+
+  input,select{width:100%;background:var(--panel-2);border:1px solid var(--border);color:var(--text);padding:10px 12px;border-radius:8px;font-family:'Inter',sans-serif;font-size:14px;margin-top:6px;}
+  label{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;font-family:'Oswald',sans-serif;}
+  .field{margin-bottom:12px;}
+  .row2{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+
+  .empty{text-align:center;color:var(--muted);padding:36px 12px;font-size:14px;}
+  .empty .big{font-family:'Oswald',sans-serif;font-size:16px;color:var(--text);text-transform:uppercase;margin-bottom:4px;}
+
+  .modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:flex-end;justify-content:center;z-index:50;}
+  .modal{background:var(--panel);border:1px solid var(--border);border-radius:16px 16px 0 0;padding:20px;width:100%;max-width:480px;}
+  .modal h3{font-family:'Oswald',sans-serif;text-transform:uppercase;margin:0 0 14px;font-size:17px;}
+  .modal-actions{display:flex;gap:10px;margin-top:16px;}
+  .modal-actions .btn{flex:1;}
+
+  .pin-gate{text-align:center;padding:50px 16px;}
+  .pin-gate .lock{font-size:32px;margin-bottom:10px;}
+  .pin-gate input{max-width:200px;margin:14px auto 0;text-align:center;letter-spacing:.3em;font-family:'JetBrains Mono',monospace;}
+
+  .admin-list-item{display:flex;justify-content:space-between;align-items:flex-start;padding:10px 0;border-top:1px solid var(--border);}
+  .admin-list-item:first-child{border-top:none;}
+  .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--panel-2);border:1px solid var(--border);color:var(--text);padding:10px 18px;border-radius:30px;font-size:13px;z-index:99;opacity:0;transition:opacity .2s;pointer-events:none;}
+  .toast.show{opacity:1;}
+  .refresh-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;}
+  .refresh-row .muted-sm{font-size:11px;color:var(--muted);font-family:'JetBrains Mono',monospace;}
+  .link-btn{background:none;border:none;color:var(--muted);text-decoration:underline;font-size:12px;cursor:pointer;padding:0;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="eyebrow">Serviço Voluntário &middot; Extras</div>
+    <h1>Escala de Serviço Extra</h1>
+    <div class="stripe"></div>
+  </header>
+
+  <nav class="tabs">
+    <button id="tab-vagas" class="active">Vagas Disponíveis</button>
+    <button id="tab-admin">Administração</button>
+  </nav>
+
+  <div id="view-vagas"></div>
+  <div id="view-admin" style="display:none;"></div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script>
+const S = window.storage;
+let shifts = [];
+let signups = [];
+let adminUnlocked = false;
+let currentPin = null;
+
+function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,8); }
+
+function showToast(msg){
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(()=>t.classList.remove('show'), 2200);
+}
+
+async function loadConfig(){
+  try{
+    const r = await S.get('config', true);
+    currentPin = r ? JSON.parse(r.value).pin : null;
+  }catch(e){ currentPin = null; }
+}
+
+async function loadShifts(){
+  try{
+    const r = await S.get('shifts', true);
+    shifts = r ? JSON.parse(r.value) : [];
+  }catch(e){ shifts = []; }
+  shifts.sort((a,b)=> (a.date+a.startTime).localeCompare(b.date+b.startTime));
+}
+
+async function saveShifts(){
+  await S.set('shifts', JSON.stringify(shifts), true);
+}
+
+async function loadSignups(){
+  try{
+    const list = await S.list('signup:', true);
+    const keys = list && list.keys ? list.keys : [];
+    const results = [];
+    for(const k of keys){
+      try{
+        const r = await S.get(k, true);
+        if(r) results.push(JSON.parse(r.value));
+      }catch(e){}
+    }
+    signups = results;
+  }catch(e){ signups = []; }
+}
+
+async function refreshAll(){
+  await Promise.all([loadShifts(), loadSignups()]);
+  render();
+}
+
+const DOW = ['DOM','SEG','TER','QUA','QUI','SEX','SÁB'];
+const MON = ['JAN','FEV','MAR','ABR','MAI','JUN','JUL','AGO','SET','OUT','NOV','DEZ'];
+
+function fmtDateParts(dateStr){
+  const [y,m,d] = dateStr.split('-').map(Number);
+  const dt = new Date(y, m-1, d);
+  return { dow: DOW[dt.getDay()], dnum: String(d).padStart(2,'0'), mon: MON[m-1] };
+}
+
+function signupsFor(shiftId){
+  return signups.filter(s => s.shiftId === shiftId);
+}
+
+function renderVagas(){
+  const el = document.getElementById('view-vagas');
+  const today = new Date(); today.setHours(0,0,0,0);
+  const upcoming = shifts.filter(s => {
+    const [y,m,d] = s.date.split('-').map(Number);
+    return new Date(y,m-1,d) >= today;
+  });
+
+  let html = `<div class="refresh-row">
+    <span class="muted-sm">${upcoming.length} vaga(s) em aberto</span>
+    <button class="link-btn" onclick="refreshAll()">Atualizar</button>
+  </div>`;
+
+  if(upcoming.length === 0){
+    html += `<div class="card empty"><div class="big">Nenhuma vaga cadastrada</div>Assim que a administração publicar horários, eles aparecem aqui.</div>`;
+  } else {
+    for(const s of upcoming){
+      const su = signupsFor(s.id);
+      const cheias = su.length >= s.vagas;
+      const dp = fmtDateParts(s.date);
+      html += `<div class="card shift-card">
+        <div class="shift-date"><div class="dow">${dp.dow}</div><div class="dnum">${dp.dnum}</div><div class="mon">${dp.mon}</div></div>
+        <div class="shift-body">
+          <div class="shift-time">${s.startTime} – ${s.endTime}</div>
+          ${s.local ? `<div class="shift-local">${escapeHtml(s.local)}</div>` : ''}
+          <div class="shift-meta">
+            <span class="vagas-badge ${cheias?'full':'open'}">${su.length}/${s.vagas} preenchidas</span>
+            <button class="btn btn-primary" ${cheias?'disabled':''} onclick="openSignupModal('${s.id}')">${cheias?'Esgotado':'Voluntariar-se'}</button>
+          </div>
+          ${su.length ? `<div class="names">${su.map(x=>`<span class="name-chip">${escapeHtml(x.nome)}</span>`).join('')}</div>` : ''}
+        </div>
+      </div>`;
+    }
+  }
+  el.innerHTML = html;
+}
+
+function escapeHtml(str){
+  const d = document.createElement('div');
+  d.textContent = str;
+  return d.innerHTML;
+}
+
+function openSignupModal(shiftId){
+  const s = shifts.find(x=>x.id===shiftId);
+  const dp = fmtDateParts(s.date);
+  const bg = document.createElement('div');
+  bg.className = 'modal-bg';
+  bg.innerHTML = `<div class="modal">
+    <h3>Confirmar voluntariado</h3>
+    <div class="shift-local" style="margin-bottom:14px;">${dp.dnum}/${dp.mon} &middot; ${s.startTime}–${s.endTime} ${s.local?('&middot; '+escapeHtml(s.local)):''}</div>
+    <div class="field"><label>Nome completo</label><input id="su-nome" placeholder="Ex: Sd Eduardo Silva" autofocus></div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="su-cancel">Cancelar</button>
+      <button class="btn btn-primary" id="su-confirm">Confirmar</button>
+    </div>
+  </div>`;
+  document.body.appendChild(bg);
+  bg.querySelector('#su-cancel').onclick = ()=> bg.remove();
+  bg.querySelector('#su-confirm').onclick = async ()=>{
+    const nome = bg.querySelector('#su-nome').value.trim();
+    if(!nome){ showToast('Digite seu nome'); return; }
+    await loadSignups();
+    const su = signupsFor(shiftId);
+    if(su.length >= s.vagas){ showToast('Vaga esgotada, atualize a página'); bg.remove(); render(); return; }
+    if(su.some(x=>x.nome.toLowerCase()===nome.toLowerCase())){ showToast('Você já está nesta vaga'); return; }
+    const entry = { id: uid(), shiftId, nome, timestamp: new Date().toISOString() };
+    await S.set('signup:'+entry.id, JSON.stringify(entry), true);
+    bg.remove();
+    showToast('Voluntariado confirmado!');
+    await refreshAll();
+  };
+}
+
+async function removeSignup(id){
+  await S.delete('signup:'+id, true);
+  await refreshAll();
+  showToast('Removido');
+}
+
+// ---------- ADMIN ----------
+
+function renderAdmin(){
+  const el = document.getElementById('view-admin');
+  if(!adminUnlocked){
+    el.innerHTML = `<div class="card pin-gate">
+      <div class="lock">🔒</div>
+      <div style="font-family:'Oswald',sans-serif;text-transform:uppercase;">${currentPin ? 'Área restrita' : 'Definir PIN de administração'}</div>
+      <div class="muted-sm" style="margin-top:6px;">${currentPin ? 'Digite o PIN para gerenciar as vagas' : 'Crie um PIN de 4 dígitos para proteger esta área'}</div>
+      <input id="pin-input" type="tel" maxlength="8" placeholder="••••">
+      <button class="btn btn-primary btn-block" id="pin-submit" style="max-width:200px;">${currentPin ? 'Entrar' : 'Definir e entrar'}</button>
+    </div>`;
+    el.querySelector('#pin-submit').onclick = async ()=>{
+      const val = el.querySelector('#pin-input').value.trim();
+      if(!val){ showToast('Digite um PIN'); return; }
+      if(!currentPin){
+        await S.set('config', JSON.stringify({pin: val}), true);
+        currentPin = val;
+        adminUnlocked = true;
+        showToast('PIN definido');
+        render();
+      } else if(val === currentPin){
+        adminUnlocked = true;
+        render();
+      } else {
+        showToast('PIN incorreto');
+      }
+    };
+    return;
+  }
+
+  let html = `<div class="card">
+    <div style="font-family:'Oswald',sans-serif;text-transform:uppercase;font-size:14px;margin-bottom:10px;">Nova vaga</div>
+    <div class="row2">
+      <div class="field"><label>Data</label><input type="date" id="nf-date"></div>
+      <div class="field"><label>Vagas</label><input type="number" id="nf-vagas" min="1" value="1"></div>
+    </div>
+    <div class="row2">
+      <div class="field"><label>Início</label><input type="time" id="nf-start"></div>
+      <div class="field"><label>Término</label><input type="time" id="nf-end"></div>
+    </div>
+    <div class="field"><label>Local (opcional)</label><input id="nf-local" placeholder="Ex: Batalhão / Evento"></div>
+    <button class="btn btn-primary btn-block" id="nf-add">Adicionar vaga</button>
+  </div>`;
+
+  html += `<div class="refresh-row"><span class="muted-sm">${shifts.length} vaga(s) cadastradas</span><button class="link-btn" onclick="refreshAll()">Atualizar</button></div>`;
+
+  if(shifts.length === 0){
+    html += `<div class="card empty">Nenhuma vaga cadastrada ainda.</div>`;
+  } else {
+    for(const s of shifts){
+      const su = signupsFor(s.id);
+      const dp = fmtDateParts(s.date);
+      html += `<div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+          <div>
+            <div class="shift-time">${dp.dnum}/${dp.mon} &middot; ${s.startTime}–${s.endTime}</div>
+            ${s.local ? `<div class="shift-local">${escapeHtml(s.local)}</div>` : ''}
+            <span class="vagas-badge ${su.length>=s.vagas?'full':'open'}" style="margin-top:6px;display:inline-block;">${su.length}/${s.vagas}</span>
+          </div>
+          <button class="btn btn-danger" onclick="deleteShift('${s.id}')">Excluir vaga</button>
+        </div>
+        ${su.length ? `<div style="margin-top:10px;">${su.map(x=>`<div class="admin-list-item"><span>${escapeHtml(x.nome)}</span><button class="link-btn" style="color:var(--red);" onclick="removeSignup('${x.id}')">remover</button></div>`).join('')}</div>` : `<div class="muted-sm" style="margin-top:8px;">Ninguém se voluntariou ainda</div>`}
+      </div>`;
+    }
+  }
+
+  html += `<button class="btn btn-ghost btn-block" id="lock-btn">Sair da administração</button>`;
+
+  el.innerHTML = html;
+  el.querySelector('#nf-add').onclick = async ()=>{
+    const date = el.querySelector('#nf-date').value;
+    const start = el.querySelector('#nf-start').value;
+    const end = el.querySelector('#nf-end').value;
+    const vagas = parseInt(el.querySelector('#nf-vagas').value) || 1;
+    const local = el.querySelector('#nf-local').value.trim();
+    if(!date || !start || !end){ showToast('Preencha data e horários'); return; }
+    await loadShifts();
+    shifts.push({ id: uid(), date, startTime: start, endTime: end, vagas, local });
+    await saveShifts();
+    showToast('Vaga adicionada');
+    await refreshAll();
+  };
+  el.querySelector('#lock-btn').onclick = ()=>{ adminUnlocked = false; render(); };
+}
+
+async function deleteShift(id){
+  if(!confirm('Excluir esta vaga? Os voluntários cadastrados nela também serão removidos.')) return;
+  await loadShifts();
+  await loadSignups();
+  shifts = shifts.filter(s=>s.id!==id);
+  await saveShifts();
+  const toRemove = signups.filter(s=>s.shiftId===id);
+  for(const s of toRemove){ await S.delete('signup:'+s.id, true); }
+  showToast('Vaga excluída');
+  await refreshAll();
+}
+
+function render(){
+  renderVagas();
+  renderAdmin();
+}
+
+document.getElementById('tab-vagas').onclick = ()=>{
+  document.getElementById('tab-vagas').classList.add('active');
+  document.getElementById('tab-admin').classList.remove('active');
+  document.getElementById('view-vagas').style.display='block';
+  document.getElementById('view-admin').style.display='none';
+};
+document.getElementById('tab-admin').onclick = ()=>{
+  document.getElementById('tab-admin').classList.add('active');
+  document.getElementById('tab-vagas').classList.remove('active');
+  document.getElementById('view-admin').style.display='block';
+  document.getElementById('view-vagas').style.display='none';
+};
+
+(async function init(){
+  await loadConfig();
+  await refreshAll();
+  setInterval(refreshAll, 20000);
+})();
+</script>
+</body>
+</html>
