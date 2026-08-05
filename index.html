@@ -108,6 +108,7 @@
 
 <script>
 const S = window.storage;
+let storageOk = !!S;
 let shifts = [];
 let signups = [];
 let adminUnlocked = false;
@@ -174,15 +175,28 @@ function signupsFor(shiftId){
   return signups.filter(s => s.shiftId === shiftId);
 }
 
+function metaLine(s){
+  const parts = [];
+  if(s.local) parts.push(s.local);
+  if(s.viatura) parts.push('Viatura ' + s.viatura);
+  return parts.join(' &middot; ');
+}
+
 function renderVagas(){
   const el = document.getElementById('view-vagas');
+  let warn = '';
+  if(!storageOk){
+    warn = `<div class="card" style="border-color:var(--red);background:var(--red-dim);color:var(--red);font-size:13px;">
+      Este app precisa ser aberto pelo link/preview do Claude (não como arquivo baixado) para salvar dados. Abra a partir da conversa no Claude.
+    </div>`;
+  }
   const today = new Date(); today.setHours(0,0,0,0);
   const upcoming = shifts.filter(s => {
     const [y,m,d] = s.date.split('-').map(Number);
     return new Date(y,m-1,d) >= today;
   });
 
-  let html = `<div class="refresh-row">
+  let html = warn + `<div class="refresh-row">
     <span class="muted-sm">${upcoming.length} vaga(s) em aberto</span>
     <button class="link-btn" onclick="refreshAll()">Atualizar</button>
   </div>`;
@@ -198,12 +212,13 @@ function renderVagas(){
         <div class="shift-date"><div class="dow">${dp.dow}</div><div class="dnum">${dp.dnum}</div><div class="mon">${dp.mon}</div></div>
         <div class="shift-body">
           <div class="shift-time">${s.startTime} – ${s.endTime}</div>
-          ${s.local ? `<div class="shift-local">${escapeHtml(s.local)}</div>` : ''}
+          ${metaLine(s) ? `<div class="shift-local">${metaLine(s)}</div>` : ''}
           <div class="shift-meta">
             <span class="vagas-badge ${cheias?'full':'open'}">${su.length}/${s.vagas} preenchidas</span>
             <button class="btn btn-primary" ${cheias?'disabled':''} onclick="openSignupModal('${s.id}')">${cheias?'Esgotado':'Voluntariar-se'}</button>
           </div>
           ${su.length ? `<div class="names">${su.map(x=>`<span class="name-chip">${escapeHtml(x.nome)}</span>`).join('')}</div>` : ''}
+          <button class="link-btn" style="margin-top:8px;" onclick="openCancelModal('${s.id}')">Cancelar meu voluntariado</button>
         </div>
       </div>`;
     }
@@ -224,7 +239,7 @@ function openSignupModal(shiftId){
   bg.className = 'modal-bg';
   bg.innerHTML = `<div class="modal">
     <h3>Confirmar voluntariado</h3>
-    <div class="shift-local" style="margin-bottom:14px;">${dp.dnum}/${dp.mon} &middot; ${s.startTime}–${s.endTime} ${s.local?('&middot; '+escapeHtml(s.local)):''}</div>
+    <div class="shift-local" style="margin-bottom:14px;">${dp.dnum}/${dp.mon} &middot; ${s.startTime}–${s.endTime}${metaLine(s) ? (' &middot; ' + metaLine(s)) : ''}</div>
     <div class="field"><label>Nome completo</label><input id="su-nome" placeholder="Ex: Sd Eduardo Silva" autofocus></div>
     <div class="modal-actions">
       <button class="btn btn-ghost" id="su-cancel">Cancelar</button>
@@ -244,6 +259,35 @@ function openSignupModal(shiftId){
     await S.set('signup:'+entry.id, JSON.stringify(entry), true);
     bg.remove();
     showToast('Voluntariado confirmado!');
+    await refreshAll();
+  };
+}
+
+function openCancelModal(shiftId){
+  const s = shifts.find(x=>x.id===shiftId);
+  const dp = fmtDateParts(s.date);
+  const bg = document.createElement('div');
+  bg.className = 'modal-bg';
+  bg.innerHTML = `<div class="modal">
+    <h3>Cancelar voluntariado</h3>
+    <div class="shift-local" style="margin-bottom:14px;">${dp.dnum}/${dp.mon} &middot; ${s.startTime}–${s.endTime}${metaLine(s) ? (' &middot; ' + metaLine(s)) : ''}</div>
+    <div class="field"><label>Digite o nome que você usou pra se voluntariar</label><input id="cn-nome" placeholder="Ex: Sd Eduardo Silva" autofocus></div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="cn-cancel">Voltar</button>
+      <button class="btn btn-danger" id="cn-confirm">Cancelar minha vaga</button>
+    </div>
+  </div>`;
+  document.body.appendChild(bg);
+  bg.querySelector('#cn-cancel').onclick = ()=> bg.remove();
+  bg.querySelector('#cn-confirm').onclick = async ()=>{
+    const nome = bg.querySelector('#cn-nome').value.trim();
+    if(!nome){ showToast('Digite seu nome'); return; }
+    await loadSignups();
+    const match = signupsFor(shiftId).find(x=>x.nome.toLowerCase()===nome.toLowerCase());
+    if(!match){ showToast('Nome não encontrado nesta vaga'); return; }
+    await S.delete('signup:'+match.id, true);
+    bg.remove();
+    showToast('Voluntariado cancelado');
     await refreshAll();
   };
 }
@@ -295,7 +339,10 @@ function renderAdmin(){
       <div class="field"><label>Início</label><input type="time" id="nf-start"></div>
       <div class="field"><label>Término</label><input type="time" id="nf-end"></div>
     </div>
-    <div class="field"><label>Local (opcional)</label><input id="nf-local" placeholder="Ex: Batalhão / Evento"></div>
+    <div class="row2">
+      <div class="field"><label>Local (opcional)</label><input id="nf-local" placeholder="Ex: Batalhão / Evento"></div>
+      <div class="field"><label>Viatura (opcional)</label><input id="nf-viatura" placeholder="Ex: 1234"></div>
+    </div>
     <button class="btn btn-primary btn-block" id="nf-add">Adicionar vaga</button>
   </div>`;
 
@@ -311,7 +358,7 @@ function renderAdmin(){
         <div style="display:flex;justify-content:space-between;align-items:flex-start;">
           <div>
             <div class="shift-time">${dp.dnum}/${dp.mon} &middot; ${s.startTime}–${s.endTime}</div>
-            ${s.local ? `<div class="shift-local">${escapeHtml(s.local)}</div>` : ''}
+            ${metaLine(s) ? `<div class="shift-local">${metaLine(s)}</div>` : ''}
             <span class="vagas-badge ${su.length>=s.vagas?'full':'open'}" style="margin-top:6px;display:inline-block;">${su.length}/${s.vagas}</span>
           </div>
           <button class="btn btn-danger" onclick="deleteShift('${s.id}')">Excluir vaga</button>
@@ -330,9 +377,10 @@ function renderAdmin(){
     const end = el.querySelector('#nf-end').value;
     const vagas = parseInt(el.querySelector('#nf-vagas').value) || 1;
     const local = el.querySelector('#nf-local').value.trim();
+    const viatura = el.querySelector('#nf-viatura').value.trim();
     if(!date || !start || !end){ showToast('Preencha data e horários'); return; }
     await loadShifts();
-    shifts.push({ id: uid(), date, startTime: start, endTime: end, vagas, local });
+    shifts.push({ id: uid(), date, startTime: start, endTime: end, vagas, local, viatura });
     await saveShifts();
     showToast('Vaga adicionada');
     await refreshAll();
@@ -370,10 +418,16 @@ document.getElementById('tab-admin').onclick = ()=>{
   document.getElementById('view-vagas').style.display='none';
 };
 
+render();
+
 (async function init(){
-  await loadConfig();
-  await refreshAll();
-  setInterval(refreshAll, 20000);
+  try{
+    await loadConfig();
+    await refreshAll();
+  }catch(e){
+    render();
+  }
+  setInterval(()=>{ refreshAll().catch(()=>{}); }, 20000);
 })();
 </script>
 </body>
