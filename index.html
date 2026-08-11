@@ -114,6 +114,9 @@
   <div id="view-admin" style="display:none;"></div>
 </div>
 <div id="toast" class="toast"></div>
+<datalist id="datalist-nomes"></datalist>
+<datalist id="datalist-locais"></datalist>
+<datalist id="datalist-viaturas"></datalist>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.7.2/mammoth.browser.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
@@ -157,14 +160,52 @@ const RANK_LABEL = {sgt:'Sargento', cabo:'Cabo', soldado:'Soldado'};
 const TEAM_LETTERS = ['A','B','C','D'];
 const TURNO_LABEL = { dia: 'Dia', noite: 'Noite' };
 
+// Fases de liberação de uma vaga: grupos EXATOS e independentes (sem cascata).
+// 'sgt'/'cabo'/'soldado' liberam só aquela patente; 'todos' libera as três.
+const FASE_OPTIONS = [
+  { v:'sgt', label:'Somente Sargentos' },
+  { v:'cabo', label:'Somente Cabos' },
+  { v:'soldado', label:'Somente Soldados' },
+  { v:'todos', label:'Todos (Sgt, Cabo, Sd)' }
+];
+const FASE_LABEL = { sgt:'Somente Sargentos', cabo:'Somente Cabos', soldado:'Somente Soldados', todos:'Todos os postos/graduações' };
+
 function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,8); }
 function escapeHtml(str){ const d=document.createElement('div'); d.textContent=str||''; return d.innerHTML; }
 function showToast(msg){ const t=document.getElementById('toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),2400); }
-function allowedRanks(fase){ const idx = RANK_ORDER.indexOf(fase); return RANK_ORDER.slice(0, (idx<0?0:idx)+1); }
-function nextFase(fase){ const idx = RANK_ORDER.indexOf(fase); return idx<2 ? RANK_ORDER[idx+1] : fase; }
-function faseLabel(fase){ return 'Liberado até: ' + RANK_LABEL[fase]; }
+function allowedRanks(fase){
+  if(fase === 'todos') return ['sgt','cabo','soldado'];
+  if(fase === 'sgt' || fase === 'cabo' || fase === 'soldado') return [fase];
+  return ['sgt']; // fallback defensivo para valor de fase ausente/inesperado
+}
+function faseLabel(fase){ return FASE_LABEL[fase] || FASE_LABEL.sgt; }
+function faseSelectOptions(selected){
+  return FASE_OPTIONS.map(o=>'<option value="'+o.v+'" '+(o.v===selected?'selected':'')+'>'+o.label+'</option>').join('');
+}
 function metaLine(s){ const parts=[]; if(s.local) parts.push(s.local); if(s.viatura) parts.push('Viatura '+s.viatura); return parts.join(' &middot; '); }
 function sortShifts(){ shifts.sort((a,b)=> (a.date+a.startTime).localeCompare(b.date+b.startTime)); }
+
+// ---------- AUTOCOMPLETAR (datalists a partir dos dados já em memória) ----------
+
+function uniqueNonEmpty(arr){
+  const seen = new Set();
+  const out = [];
+  for(const v of arr){
+    const t = (v||'').trim();
+    if(!t || seen.has(t.toLowerCase())) continue;
+    seen.add(t.toLowerCase());
+    out.push(t);
+  }
+  return out;
+}
+function refreshDatalists(){
+  const nomesEl = document.getElementById('datalist-nomes');
+  const locaisEl = document.getElementById('datalist-locais');
+  const viaturasEl = document.getElementById('datalist-viaturas');
+  if(nomesEl) nomesEl.innerHTML = uniqueNonEmpty(signups.map(s=>s.nome)).map(v=>'<option value="'+escapeHtml(v)+'">').join('');
+  if(locaisEl) locaisEl.innerHTML = uniqueNonEmpty(shifts.map(s=>s.local)).map(v=>'<option value="'+escapeHtml(v)+'">').join('');
+  if(viaturasEl) viaturasEl.innerHTML = uniqueNonEmpty(shifts.map(s=>s.viatura)).map(v=>'<option value="'+escapeHtml(v)+'">').join('');
+}
 
 // ---------- FIRESTORE SYNC (documento único: escala/estado) ----------
 // shifts e signups são guardados no documento como MAPAS (objeto id -> item),
@@ -363,7 +404,7 @@ function openSignupModal(shiftId){
     + '<h3>Confirmar voluntariado</h3>'
     + '<div class="shift-local" style="margin-bottom:6px;">'+dp.dnum+'/'+dp.mon+' &middot; '+s.startTime+'–'+s.endTime+(metaLine(s)?(' &middot; '+metaLine(s)):'')+'</div>'
     + '<div class="badge phase" style="margin-bottom:14px;">'+faseLabel(s.fase)+'</div>'
-    + '<div class="field"><label>Nome completo</label><input id="su-nome" placeholder="Ex: Sd Eduardo Silva" autofocus></div>'
+    + '<div class="field"><label>Nome completo</label><input id="su-nome" list="datalist-nomes" placeholder="Ex: Sd Eduardo Silva" autofocus></div>'
     + '<div class="field"><label>Patente</label><select id="su-patente">'+rankOptions(allowed)+'</select></div>'
     + '<div class="field"><label>CPF</label><input id="su-cpf" placeholder="000.000.000-00" maxlength="14" inputmode="numeric"></div>'
     + '<div class="modal-actions"><button class="btn btn-ghost" id="su-cancel">Cancelar</button><button class="btn btn-primary" id="su-confirm">Confirmar</button></div>'
@@ -408,7 +449,7 @@ function openCancelModal(shiftId){
   bg.innerHTML = '<div class="modal">'
     + '<h3>Cancelar voluntariado</h3>'
     + '<div class="shift-local" style="margin-bottom:14px;">'+dp.dnum+'/'+dp.mon+' &middot; '+s.startTime+'–'+s.endTime+(metaLine(s)?(' &middot; '+metaLine(s)):'')+'</div>'
-    + '<div class="field"><label>Digite o nome que você usou pra se voluntariar</label><input id="cn-nome" placeholder="Ex: Sd Eduardo Silva" autofocus></div>'
+    + '<div class="field"><label>Digite o nome que você usou pra se voluntariar</label><input id="cn-nome" list="datalist-nomes" placeholder="Ex: Sd Eduardo Silva" autofocus></div>'
     + '<div class="modal-actions"><button class="btn btn-ghost" id="cn-cancel">Voltar</button><button class="btn btn-danger" id="cn-confirm">Cancelar minha vaga</button></div>'
     + '</div>';
   document.body.appendChild(bg);
@@ -434,13 +475,21 @@ function removeSignup(id){
   persistSignupDelete(id);
 }
 
-function advanceFase(shiftId){
+function setFase(shiftId, novaFase){
   const s = shifts.find(x=>x.id===shiftId);
-  if(!s) return;
-  s.fase = nextFase(s.fase);
-  showToast('Liberado para: '+RANK_LABEL[s.fase]);
+  if(!s || s.fase === novaFase) return;
+  s.fase = novaFase;
+  showToast('Fase alterada: '+faseLabel(novaFase));
   render();
   persistShiftUpsert(s);
+}
+
+function faseQuickButtonsHtml(s){
+  return '<div style="display:flex;gap:4px;">' + FASE_OPTIONS.map(o=>{
+    const active = s.fase === o.v;
+    const shortLabel = o.v==='soldado' ? 'Sd' : (o.v==='todos' ? 'Todos' : (o.v==='sgt' ? 'Sgt' : 'Cabo'));
+    return '<button class="btn '+(active?'btn-blue':'btn-ghost')+' btn-sm" '+(active?'disabled':'')+' onclick="setFase(\''+s.id+'\',\''+o.v+'\')">'+shortLabel+'</button>';
+  }).join('') + '</div>';
 }
 
 // ---------- ADMIN ----------
@@ -506,8 +555,8 @@ function renderAdmin(){
     + '<div style="font-family:\'Oswald\',sans-serif;text-transform:uppercase;font-size:14px;margin-bottom:10px;">Nova vaga</div>'
     + '<div class="row2"><div class="field"><label>Data</label><input type="date" id="nf-date"></div><div class="field"><label>Vagas</label><input type="number" id="nf-vagas" min="1" value="1"></div></div>'
     + '<div class="row2"><div class="field"><label>Início</label><input type="time" id="nf-start"></div><div class="field"><label>Término</label><input type="time" id="nf-end"></div></div>'
-    + '<div class="row2"><div class="field"><label>Local (opcional)</label><input id="nf-local" placeholder="Ex: Batalhão / Evento"></div><div class="field"><label>Viatura (opcional)</label><input id="nf-viatura" placeholder="Ex: 1234"></div></div>'
-    + '<div class="field"><label>Liberar inicialmente para</label><select id="nf-fase"><option value="sgt">Sargentos</option><option value="cabo">Sargentos + Cabos</option><option value="soldado">Todos (Sgt, Cabo, Sd)</option></select></div>'
+    + '<div class="row2"><div class="field"><label>Local (opcional)</label><input id="nf-local" list="datalist-locais" placeholder="Ex: Batalhão / Evento"></div><div class="field"><label>Viatura (opcional)</label><input id="nf-viatura" list="datalist-viaturas" placeholder="Ex: 1234"></div></div>'
+    + '<div class="field"><label>Liberar inicialmente para</label><select id="nf-fase">'+faseSelectOptions('sgt')+'</select></div>'
     + '<button class="btn btn-primary btn-block" id="nf-add">Adicionar vaga</button>'
     + '</div>';
 
@@ -524,7 +573,8 @@ function renderAdmin(){
           + '<div style="font-family:\'Oswald\',sans-serif;text-transform:uppercase;font-size:13px;margin-bottom:8px;color:var(--amber);">Editando vaga</div>'
           + '<div class="row2"><div class="field"><label>Data</label><input type="date" id="ef-date" value="'+s.date+'"></div><div class="field"><label>Vagas</label><input type="number" id="ef-vagas" min="1" value="'+s.vagas+'"></div></div>'
           + '<div class="row2"><div class="field"><label>Início</label><input type="time" id="ef-start" value="'+s.startTime+'"></div><div class="field"><label>Término</label><input type="time" id="ef-end" value="'+s.endTime+'"></div></div>'
-          + '<div class="row2"><div class="field"><label>Local</label><input id="ef-local" value="'+escapeHtml(s.local||'')+'"></div><div class="field"><label>Viatura</label><input id="ef-viatura" value="'+escapeHtml(s.viatura||'')+'"></div></div>'
+          + '<div class="row2"><div class="field"><label>Local</label><input id="ef-local" list="datalist-locais" value="'+escapeHtml(s.local||'')+'"></div><div class="field"><label>Viatura</label><input id="ef-viatura" list="datalist-viaturas" value="'+escapeHtml(s.viatura||'')+'"></div></div>'
+          + '<div class="field"><label>Liberado para</label><select id="ef-fase">'+faseSelectOptions(s.fase)+'</select></div>'
           + '<div class="modal-actions"><button class="btn btn-ghost" id="ef-cancel">Cancelar</button><button class="btn btn-primary" id="ef-save">Salvar</button></div>'
           + '</div>';
       } else {
@@ -534,8 +584,8 @@ function renderAdmin(){
           + (metaLine(s) ? '<div class="shift-local">'+metaLine(s)+'</div>' : '')
           + '<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;"><span class="badge '+(su.length>=s.vagas?'full':'open')+'">'+su.length+'/'+s.vagas+'</span><span class="badge phase">'+faseLabel(s.fase)+'</span></div>'
           + '</div>'
-          + '<div style="display:flex;gap:6px;flex-wrap:wrap;">'
-          + (s.fase !== 'soldado' ? '<button class="btn btn-blue btn-sm" onclick="advanceFase(\''+s.id+'\')">Liberar próxima patente</button>' : '')
+          + '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">'
+          + faseQuickButtonsHtml(s)
           + '<button class="btn btn-ghost btn-sm" onclick="startEditShift(\''+s.id+'\')">Editar</button>'
           + '<button class="btn btn-danger btn-sm" onclick="deleteShift(\''+s.id+'\')">Excluir</button>'
           + '</div></div>'
@@ -620,6 +670,7 @@ function renderAdmin(){
       s.vagas = parseInt(el.querySelector('#ef-vagas').value) || 1;
       s.local = el.querySelector('#ef-local').value.trim();
       s.viatura = el.querySelector('#ef-viatura').value.trim();
+      s.fase = el.querySelector('#ef-fase').value;
       editingShiftId = null;
       sortShifts();
       showToast('Vaga atualizada');
@@ -1183,7 +1234,7 @@ function clearAllData(){
   persistWipeAll();
 }
 
-function render(){ renderVagas(); renderAdmin(); }
+function render(){ renderVagas(); renderAdmin(); refreshDatalists(); }
 
 document.getElementById('tab-vagas').onclick = ()=>{
   activeTab = 'vagas';
@@ -1204,7 +1255,7 @@ document.getElementById('tab-admin').onclick = ()=>{
 window.refreshAll = refreshAll;
 window.openSignupModal = openSignupModal;
 window.openCancelModal = openCancelModal;
-window.advanceFase = advanceFase;
+window.setFase = setFase;
 window.startEditShift = startEditShift;
 window.deleteShift = deleteShift;
 window.removeSignup = removeSignup;
