@@ -115,6 +115,9 @@
 </div>
 <div id="toast" class="toast"></div>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.7.2/mammoth.browser.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.min.js"></script>
+
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
@@ -134,15 +137,23 @@ const auth = getAuth(app);
 const db = getFirestore(app);
 const docRef = doc(db, 'escala', 'estado');
 
+if(window.pdfjsLib){
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.worker.min.js';
+}
+
 let shifts = [];
 let signups = [];
 let adminUnlocked = false;
 let currentPin = null;
 let editingShiftId = null;
 let activeTab = 'vagas';
+let escalaOficial = null;      // { A:[{nome,patente,cpf}], B:[...], C:[...], D:[...] }
+let calendarioOficial = null;  // { 'YYYY-MM-DD': { dia:'A', noite:'B' }, ... }
 
 const RANK_ORDER = ['sgt','cabo','soldado'];
 const RANK_LABEL = {sgt:'Sargento', cabo:'Cabo', soldado:'Soldado'};
+const TEAM_LETTERS = ['A','B','C','D'];
+const TURNO_LABEL = { dia: 'Dia', noite: 'Noite' };
 
 function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,8); }
 function escapeHtml(str){ const d=document.createElement('div'); d.textContent=str||''; return d.innerHTML; }
@@ -165,6 +176,8 @@ function applyRemoteData(data){
   shifts.forEach(s=>{ if(!s.fase) s.fase='sgt'; });
   sortShifts();
   signups = Object.values(data.signups || {}).map(s=>({...s}));
+  escalaOficial = data.escalaOficial || null;
+  calendarioOficial = data.calendarioOficial || null;
 }
 
 function handlePersistError(e){
@@ -226,6 +239,76 @@ function fmtDateParts(dateStr){
 }
 function signupsFor(shiftId){ return signups.filter(s => s.shiftId === shiftId); }
 
+// ---------- CRUZAMENTO COM A ESCALA OFICIAL (RPA/COPOM) ----------
+
+function maskCpf(value){
+  let v = (value||'').replace(/\D/g,'').slice(0,11);
+  if(v.length > 9) return v.replace(/(\d{3})(\d{3})(\d{3})(\d{1,2})/, '$1.$2.$3-$4');
+  if(v.length > 6) return v.replace(/(\d{3})(\d{3})(\d{1,3})/, '$1.$2.$3');
+  if(v.length > 3) return v.replace(/(\d{3})(\d{1,3})/, '$1.$2');
+  return v;
+}
+
+function isValidCpfShape(cpf){
+  return /^[0-9Xx]{3}\.[0-9Xx]{3}\.[0-9Xx]{3}-[0-9Xx]{2}$/.test((cpf||'').trim());
+}
+
+// Compara um CPF completo digitado (11 dígitos) com um CPF da escala oficial
+// que pode vir parcialmente mascarado (X no lugar de dígitos ocultos).
+function cpfMatchesMasked(inputDigits, storedCpfRaw){
+  const stored = (storedCpfRaw||'').replace(/[.\-\s]/g,'').toUpperCase();
+  if(stored.length !== 11 || inputDigits.length !== 11) return false;
+  for(let i=0;i<11;i++){
+    const c = stored[i];
+    if(c === 'X') continue;
+    if(c !== inputDigits[i]) return false;
+  }
+  return true;
+}
+
+function shiftDateStr(dateStr, deltaDays){
+  const [y,m,d] = dateStr.split('-').map(Number);
+  const dt = new Date(y, m-1, d + deltaDays);
+  return dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0');
+}
+
+// Turno Dia = 06:00–18:00. Turno Noite = 18:00–06:00 (atravessa a meia-noite).
+// Retorna quais turnos oficiais (do próprio dia da vaga e, se for o caso, o
+// turno Noite do dia anterior) se sobrepõem ao horário da vaga extra.
+function overlappingTurnos(startTime, endTime){
+  const toMin = t=>{ const [h,m]=t.split(':').map(Number); return h*60+m; };
+  let s = toMin(startTime), e = toMin(endTime);
+  if(e <= s) e += 1440; // vaga atravessa a meia-noite
+  const overlaps = (aS,aE)=> s < aE && e > aS;
+  const result = [];
+  if(overlaps(360,1080)) result.push({ offsetDays:0, turno:'dia' });
+  if(overlaps(1080,1800)) result.push({ offsetDays:0, turno:'noite' });
+  if(s < 360) result.push({ offsetDays:-1, turno:'noite' }); // cauda do plantão noturno do dia anterior
+  return result;
+}
+
+// Verifica se o CPF informado já está escalado no serviço normal em algum
+// turno que se sobrepõe ao horário da vaga extra. Retorna null se não há
+// conflito (ou se a escala oficial ainda não foi importada).
+function findEscalaConflict(dateStr, startTime, endTime, cpfDigits){
+  if(!escalaOficial || !calendarioOficial) return null;
+  const turnos = overlappingTurnos(startTime, endTime);
+  for(const t of turnos){
+    const targetDate = t.offsetDays === 0 ? dateStr : shiftDateStr(dateStr, t.offsetDays);
+    const diaCal = calendarioOficial[targetDate];
+    if(!diaCal) continue;
+    const equipeLetra = diaCal[t.turno];
+    if(!equipeLetra) continue;
+    const membros = escalaOficial[equipeLetra];
+    if(!membros) continue;
+    const found = membros.find(m=> cpfMatchesMasked(cpfDigits, m.cpf));
+    if(found){
+      return { equipe: equipeLetra, turnoLabel: TURNO_LABEL[t.turno], date: targetDate };
+    }
+  }
+  return null;
+}
+
 // ---------- PUBLIC VIEW ----------
 
 function renderVagas(){
@@ -280,21 +363,32 @@ function openSignupModal(shiftId){
     + '<div class="badge phase" style="margin-bottom:14px;">'+faseLabel(s.fase)+'</div>'
     + '<div class="field"><label>Nome completo</label><input id="su-nome" placeholder="Ex: Sd Eduardo Silva" autofocus></div>'
     + '<div class="field"><label>Patente</label><select id="su-patente">'+rankOptions(allowed)+'</select></div>'
+    + '<div class="field"><label>CPF</label><input id="su-cpf" placeholder="000.000.000-00" maxlength="14" inputmode="numeric"></div>'
     + '<div class="modal-actions"><button class="btn btn-ghost" id="su-cancel">Cancelar</button><button class="btn btn-primary" id="su-confirm">Confirmar</button></div>'
     + '</div>';
   document.body.appendChild(bg);
+  const cpfInput = bg.querySelector('#su-cpf');
+  cpfInput.oninput = ()=>{ cpfInput.value = maskCpf(cpfInput.value); };
   bg.querySelector('#su-cancel').onclick = ()=> bg.remove();
   bg.querySelector('#su-confirm').onclick = ()=>{
     const nome = bg.querySelector('#su-nome').value.trim();
     const patente = bg.querySelector('#su-patente').value;
+    const cpfMasked = cpfInput.value.trim();
+    const cpfDigits = cpfMasked.replace(/\D/g,'');
     if(!nome){ showToast('Digite seu nome'); return; }
+    if(cpfDigits.length !== 11){ showToast('Digite um CPF válido'); return; }
     const freshShift = shifts.find(x=>x.id===shiftId);
     if(!freshShift){ showToast('Vaga não encontrada'); bg.remove(); return; }
     const su = signupsFor(shiftId);
     if(!allowedRanks(freshShift.fase).includes(patente)){ showToast('Essa vaga ainda não está liberada para '+RANK_LABEL[patente]); return; }
     if(su.length >= freshShift.vagas){ showToast('Vaga esgotada, atualize a página'); bg.remove(); render(); return; }
     if(su.some(x=>x.nome.toLowerCase()===nome.toLowerCase())){ showToast('Você já está nesta vaga'); return; }
-    const entry = { id: uid(), shiftId, nome, patente, timestamp: new Date().toISOString() };
+    const conflict = findEscalaConflict(freshShift.date, freshShift.startTime, freshShift.endTime, cpfDigits);
+    if(conflict){
+      showToast('Você já está escalado no serviço normal neste dia (Equipe '+conflict.equipe+', turno '+conflict.turnoLabel+'). Não é possível se voluntariar.');
+      return;
+    }
+    const entry = { id: uid(), shiftId, nome, patente, cpf: cpfMasked, timestamp: new Date().toISOString() };
     signups.push(entry);
     bg.remove();
     showToast('Voluntariado confirmado!');
@@ -377,6 +471,17 @@ function renderAdmin(){
     + '</div>';
 
   html += '<div class="card">'
+    + '<div style="font-family:\'Oswald\',sans-serif;text-transform:uppercase;font-size:14px;margin-bottom:10px;">Importar Escala Mensal</div>'
+    + '<div class="muted-sm" style="margin-bottom:10px;">Envie o PDF da escala de equipes e o DOCX do calendário mensal para cruzar com os voluntariados extras e evitar que alguém se voluntarie enquanto já está de serviço normal.</div>'
+    + '<div class="field"><label>PDF &middot; Escala de equipes</label><input type="file" id="imp-pdf" accept="application/pdf"></div>'
+    + '<div class="field"><label>DOCX &middot; Calendário mensal</label><input type="file" id="imp-docx" accept=".docx"></div>'
+    + '<button class="btn btn-primary btn-block" id="imp-process">Processar arquivos</button>'
+    + (escalaOficial && calendarioOficial
+        ? '<div class="muted-sm" style="margin-top:8px;">Escala oficial carregada: '+TEAM_LETTERS.map(l=>(escalaOficial[l]||[]).length).reduce((a,b)=>a+b,0)+' policial(is) em '+TEAM_LETTERS.length+' equipes, '+Object.keys(calendarioOficial).length+' dia(s) de calendário.</div>'
+        : '<div class="muted-sm" style="margin-top:8px;">Nenhuma escala oficial importada ainda — o cruzamento de conflitos fica desativado até a importação.</div>')
+    + '</div>';
+
+  html += '<div class="card">'
     + '<div style="font-family:\'Oswald\',sans-serif;text-transform:uppercase;font-size:14px;margin-bottom:10px;">Nova vaga</div>'
     + '<div class="row2"><div class="field"><label>Data</label><input type="date" id="nf-date"></div><div class="field"><label>Vagas</label><input type="number" id="nf-vagas" min="1" value="1"></div></div>'
     + '<div class="row2"><div class="field"><label>Início</label><input type="time" id="nf-start"></div><div class="field"><label>Término</label><input type="time" id="nf-end"></div></div>'
@@ -455,6 +560,8 @@ function renderAdmin(){
   if(demoBtn){ demoBtn.onclick = loadDemoData; }
   const clearBtn = el.querySelector('#clear-btn');
   if(clearBtn){ clearBtn.onclick = clearAllData; }
+  const impProcessBtn = el.querySelector('#imp-process');
+  if(impProcessBtn){ impProcessBtn.onclick = processImportFiles; }
 
   const addBtn = el.querySelector('#nf-add');
   if(addBtn){
@@ -524,6 +631,241 @@ function openChangePinModal(){
     bg.remove();
     showToast('PIN atualizado');
     persist({ pin: novo });
+  };
+}
+
+// ---------- IMPORTAÇÃO DA ESCALA MENSAL (PDF de equipes + DOCX de calendário) ----------
+
+async function processImportFiles(){
+  const pdfInput = document.getElementById('imp-pdf');
+  const docxInput = document.getElementById('imp-docx');
+  const pdfFile = pdfInput && pdfInput.files[0];
+  const docxFile = docxInput && docxInput.files[0];
+  if(!pdfFile || !docxFile){ showToast('Selecione o PDF e o DOCX antes de processar'); return; }
+  if(!window.pdfjsLib || !window.mammoth){ showToast('Bibliotecas de leitura de arquivo não carregaram. Verifique sua conexão e recarregue a página.'); return; }
+  const btn = document.getElementById('imp-process');
+  if(btn){ btn.disabled = true; btn.textContent = 'Processando...'; }
+  try{
+    const [teams, calendarResult] = await Promise.all([
+      parseEquipesPdf(pdfFile),
+      parseCalendarioDocx(docxFile)
+    ]);
+    openImportPreviewModal(teams, calendarResult.calendar, calendarResult.usedFallback);
+  }catch(e){
+    console.error(e);
+    showToast('Erro ao processar os arquivos: '+(e && e.message ? e.message : 'formato inesperado'));
+  }finally{
+    if(btn){ btn.disabled = false; btn.textContent = 'Processar arquivos'; }
+  }
+}
+
+// --- PDF (escala de equipes) ---
+
+async function parseEquipesPdf(file){
+  const buf = await file.arrayBuffer();
+  const pdf = await window.pdfjsLib.getDocument({ data: buf }).promise;
+  const lines = [];
+  for(let i=1;i<=pdf.numPages;i++){
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+    let lastY = null, cur = '';
+    for(const item of content.items){
+      const y = item.transform[5];
+      if(lastY !== null && Math.abs(y-lastY) > 2){
+        if(cur.trim()) lines.push(cur.trim());
+        cur = '';
+      }
+      cur += item.str + ' ';
+      lastY = y;
+    }
+    if(cur.trim()) lines.push(cur.trim());
+  }
+  return parseEquipesFromLines(lines);
+}
+
+// Um registro no PDF tem o formato "Função - Patente. QP PM Nome, CPF XXX.XXX.XXX-XX",
+// mas a extração de texto do PDF pode quebrar isso em várias "linhas" — por isso
+// concatenamos linhas num buffer até encontrar um CPF completo.
+const CPF_COMPLETE_RE = /CPF[:\s]*([0-9Xx]{3}\.[0-9Xx]{3}\.[0-9Xx]{3}-[0-9Xx]{2})/i;
+const REGISTRO_RE = /-\s*([^.]+?)\.\s*QP\s*PM\s*([^,]+?),\s*CPF[:\s]*([0-9Xx]{3}\.[0-9Xx]{3}\.[0-9Xx]{3}-[0-9Xx]{2})/i;
+
+function parseEquipesFromLines(lines){
+  const teams = { A:[], B:[], C:[], D:[] };
+  let currentTeam = null;
+  let buffer = '';
+  const flushBuffer = ()=>{
+    if(!currentTeam || !buffer.trim()){ buffer=''; return; }
+    const m = buffer.match(REGISTRO_RE);
+    if(m){
+      const cpf = m[3].trim().toUpperCase();
+      teams[currentTeam].push({ nome: m[2].trim(), patente: m[1].trim(), cpf, cpfSuspeito: !isValidCpfShape(cpf) });
+    } else {
+      const cpfLoose = buffer.match(CPF_COMPLETE_RE);
+      teams[currentTeam].push({
+        nome: buffer.replace(CPF_COMPLETE_RE,'').replace(/QP\s*PM/i,'').trim().slice(0,80),
+        patente: '',
+        cpf: cpfLoose ? cpfLoose[1].toUpperCase() : '',
+        cpfSuspeito: true
+      });
+    }
+    buffer = '';
+  };
+  for(const raw of lines){
+    const line = raw.trim();
+    if(!line) continue;
+    const teamMatch = line.match(/EQUIPE\s*([A-D])\b/i);
+    if(teamMatch){
+      flushBuffer();
+      currentTeam = teamMatch[1].toUpperCase();
+      continue;
+    }
+    if(!currentTeam) continue; // texto antes da primeira "Equipe X" (cabeçalho do documento) é ignorado
+    buffer += (buffer ? ' ' : '') + line;
+    if(CPF_COMPLETE_RE.test(buffer)) flushBuffer();
+  }
+  flushBuffer();
+  return teams;
+}
+
+// --- DOCX (calendário mensal) ---
+
+const MESES_PT = ['JANEIRO','FEVEREIRO','MARÇO','ABRIL','MAIO','JUNHO','JULHO','AGOSTO','SETEMBRO','OUTUBRO','NOVEMBRO','DEZEMBRO'];
+
+async function parseCalendarioDocx(file){
+  const buf = await file.arrayBuffer();
+  const result = await window.mammoth.convertToHtml({ arrayBuffer: buf });
+  const container = document.createElement('div');
+  container.innerHTML = result.value;
+
+  const tables = Array.from(container.querySelectorAll('table'));
+  if(tables.length === 0) throw new Error('Nenhuma tabela encontrada no documento DOCX');
+
+  const headingFor = (table)=>{
+    let node = table.previousElementSibling;
+    let hops = 0;
+    while(node && hops < 6){
+      const t = (node.textContent||'').trim();
+      if(t) return t.toUpperCase();
+      node = node.previousElementSibling;
+      hops++;
+    }
+    return '';
+  };
+
+  const today = new Date();
+  const currentMonthName = MESES_PT[today.getMonth()];
+  const currentYear = String(today.getFullYear());
+
+  let targetTable = tables[0];
+  let usedFallback = tables.length > 1;
+  if(tables.length > 1){
+    for(const t of tables){
+      const heading = headingFor(t);
+      if(heading.includes(currentMonthName) && heading.includes(currentYear)){
+        targetTable = t; usedFallback = false; break;
+      }
+    }
+  }
+
+  const heading = headingFor(targetTable);
+  const yearMatch = heading.match(/(\d{4})/);
+  const year = yearMatch ? parseInt(yearMatch[1],10) : today.getFullYear();
+
+  const calendar = {};
+  const rows = Array.from(targetTable.querySelectorAll('tr'));
+  for(const row of rows){
+    const cells = Array.from(row.querySelectorAll('td,th')).map(c=>(c.textContent||'').trim());
+    if(cells.length < 4) continue;
+    const dm = cells[0].match(/^(\d{1,2})\/(\d{1,2})/);
+    if(!dm) continue; // linha de cabeçalho ou vazia
+    const dateStr = year+'-'+dm[2].padStart(2,'0')+'-'+dm[1].padStart(2,'0');
+    calendar[dateStr] = { dia: (cells[2]||'').toUpperCase(), noite: (cells[3]||'').toUpperCase() };
+  }
+
+  return { calendar, usedFallback };
+}
+
+// --- Tela de prévia/conferência ---
+
+function buildTeamSectionHtml(letter, members){
+  let html = '<div style="margin-bottom:16px;">'
+    + '<div style="font-family:\'Oswald\',sans-serif;text-transform:uppercase;font-size:13px;color:var(--amber);margin-bottom:8px;">Equipe '+letter+' ('+members.length+')</div>';
+  if(members.length === 0){
+    html += '<div class="muted-sm">Nenhum policial identificado para esta equipe.</div>';
+  } else {
+    members.forEach((m, idx)=>{
+      html += '<div class="row3" style="margin-bottom:4px;">'
+        + '<input data-imp-team="'+letter+'" data-imp-idx="'+idx+'" data-imp-field="patente" value="'+escapeHtml(m.patente||'')+'" placeholder="Patente">'
+        + '<input data-imp-team="'+letter+'" data-imp-idx="'+idx+'" data-imp-field="nome" value="'+escapeHtml(m.nome||'')+'" placeholder="Nome">'
+        + '<input data-imp-team="'+letter+'" data-imp-idx="'+idx+'" data-imp-field="cpf" value="'+escapeHtml(m.cpf||'')+'" placeholder="000.000.000-00" style="'+(m.cpfSuspeito?'border-color:var(--red);':'')+'">'
+        + '</div>'
+        + (m.cpfSuspeito ? '<div class="muted-sm" style="color:var(--red);margin:-2px 0 6px;">CPF fora do padrão esperado — confira manualmente.</div>' : '');
+    });
+  }
+  html += '</div>';
+  return html;
+}
+
+function buildCalendarSectionHtml(calendar){
+  const dates = Object.keys(calendar).sort();
+  let html = '<div style="font-family:\'Oswald\',sans-serif;text-transform:uppercase;font-size:13px;color:var(--amber);margin:16px 0 8px;">Calendário ('+dates.length+' dia(s))</div>';
+  if(dates.length === 0){
+    html += '<div class="muted-sm">Nenhum dia identificado no calendário.</div>';
+  } else {
+    html += '<div class="table-wrap"><table class="roster"><thead><tr><th>Data</th><th>Dia</th><th>Noite</th></tr></thead><tbody>';
+    dates.forEach(dateStr=>{
+      const entry = calendar[dateStr];
+      const dp = fmtDateParts(dateStr);
+      html += '<tr><td>'+dp.dnum+'/'+dp.mon+'</td>'
+        + '<td><input data-imp-cal-date="'+dateStr+'" data-imp-cal-field="dia" value="'+escapeHtml(entry.dia||'')+'" style="max-width:56px;"></td>'
+        + '<td><input data-imp-cal-date="'+dateStr+'" data-imp-cal-field="noite" value="'+escapeHtml(entry.noite||'')+'" style="max-width:56px;"></td></tr>';
+    });
+    html += '</tbody></table></div>';
+  }
+  return html;
+}
+
+function openImportPreviewModal(teams, calendar, calendarFallback){
+  const bg = document.createElement('div');
+  bg.className = 'modal-bg';
+  let inner = '<div class="modal" style="max-width:640px;">'
+    + '<h3>Conferir escala importada</h3>'
+    + '<div class="muted-sm" style="margin-bottom:12px;">Revise os campos abaixo — a extração automática pode errar. Corrija o que precisar antes de salvar.</div>';
+  if(calendarFallback){
+    inner += '<div class="muted-sm" style="color:var(--red);margin-bottom:10px;">Não encontramos uma tabela para o mês/ano atual no DOCX — usando a primeira tabela do documento. Confira as datas com atenção.</div>';
+  }
+  TEAM_LETTERS.forEach(letter=>{ inner += buildTeamSectionHtml(letter, teams[letter] || []); });
+  inner += buildCalendarSectionHtml(calendar);
+  inner += '<div class="modal-actions"><button class="btn btn-ghost" id="imp-cancel">Cancelar</button><button class="btn btn-primary" id="imp-confirm">Confirmar e salvar</button></div>'
+    + '</div>';
+  bg.innerHTML = inner;
+  document.body.appendChild(bg);
+  bg.querySelector('#imp-cancel').onclick = ()=> bg.remove();
+  bg.querySelector('#imp-confirm').onclick = ()=>{
+    const finalTeams = { A:[], B:[], C:[], D:[] };
+    bg.querySelectorAll('[data-imp-team]').forEach(input=>{
+      const letter = input.getAttribute('data-imp-team');
+      const idx = parseInt(input.getAttribute('data-imp-idx'), 10);
+      const field = input.getAttribute('data-imp-field');
+      if(!finalTeams[letter][idx]) finalTeams[letter][idx] = { nome:'', patente:'', cpf:'' };
+      finalTeams[letter][idx][field] = input.value.trim();
+    });
+    TEAM_LETTERS.forEach(letter=>{ finalTeams[letter] = finalTeams[letter].filter(m=> m && (m.nome || m.cpf)); });
+
+    const finalCalendar = {};
+    bg.querySelectorAll('[data-imp-cal-date]').forEach(input=>{
+      const dateStr = input.getAttribute('data-imp-cal-date');
+      const field = input.getAttribute('data-imp-cal-field');
+      if(!finalCalendar[dateStr]) finalCalendar[dateStr] = { dia:'', noite:'' };
+      finalCalendar[dateStr][field] = input.value.trim().toUpperCase();
+    });
+
+    escalaOficial = finalTeams;
+    calendarioOficial = finalCalendar;
+    bg.remove();
+    showToast('Escala oficial importada e salva');
+    render();
+    persist({ escalaOficial: finalTeams, calendarioOficial: finalCalendar });
   };
 }
 
