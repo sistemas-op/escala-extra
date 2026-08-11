@@ -117,6 +117,7 @@
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.7.2/mammoth.browser.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
@@ -472,9 +473,9 @@ function renderAdmin(){
 
   html += '<div class="card">'
     + '<div style="font-family:\'Oswald\',sans-serif;text-transform:uppercase;font-size:14px;margin-bottom:10px;">Importar Escala Mensal</div>'
-    + '<div class="muted-sm" style="margin-bottom:10px;">Envie o PDF da escala de equipes e o DOCX do calendário mensal para cruzar com os voluntariados extras e evitar que alguém se voluntarie enquanto já está de serviço normal.</div>'
-    + '<div class="field"><label>PDF &middot; Escala de equipes</label><input type="file" id="imp-pdf" accept="application/pdf"></div>'
-    + '<div class="field"><label>DOCX &middot; Calendário mensal</label><input type="file" id="imp-docx" accept=".docx"></div>'
+    + '<div class="muted-sm" style="margin-bottom:10px;">Envie a escala de equipes e o calendário mensal para cruzar com os voluntariados extras e evitar que alguém se voluntarie enquanto já está de serviço normal.</div>'
+    + '<div class="field"><label>Escala de equipes (PDF, DOCX, XLSX, ODS ou CSV)</label><input type="file" id="imp-equipes" accept=".pdf,.docx,.xlsx,.ods,.csv"></div>'
+    + '<div class="field"><label>Calendário mensal (DOCX, XLSX, ODS ou CSV)</label><input type="file" id="imp-calendario" accept=".docx,.xlsx,.ods,.csv"></div>'
     + '<button class="btn btn-primary btn-block" id="imp-process">Processar arquivos</button>'
     + (escalaOficial && calendarioOficial
         ? '<div class="muted-sm" style="margin-top:8px;">Escala oficial carregada: '+TEAM_LETTERS.map(l=>(escalaOficial[l]||[]).length).reduce((a,b)=>a+b,0)+' policial(is) em '+TEAM_LETTERS.length+' equipes, '+Object.keys(calendarioOficial).length+' dia(s) de calendário.</div>'
@@ -634,21 +635,37 @@ function openChangePinModal(){
   };
 }
 
-// ---------- IMPORTAÇÃO DA ESCALA MENSAL (PDF de equipes + DOCX de calendário) ----------
+// ---------- IMPORTAÇÃO DA ESCALA MENSAL (PDF de equipes + calendário em DOCX/XLSX/ODS/CSV) ----------
+
+function getFileExt(filename){
+  const m = (filename||'').toLowerCase().match(/\.([a-z0-9]+)$/);
+  return m ? m[1] : '';
+}
 
 async function processImportFiles(){
-  const pdfInput = document.getElementById('imp-pdf');
-  const docxInput = document.getElementById('imp-docx');
-  const pdfFile = pdfInput && pdfInput.files[0];
-  const docxFile = docxInput && docxInput.files[0];
-  if(!pdfFile || !docxFile){ showToast('Selecione o PDF e o DOCX antes de processar'); return; }
-  if(!window.pdfjsLib || !window.mammoth){ showToast('Bibliotecas de leitura de arquivo não carregaram. Verifique sua conexão e recarregue a página.'); return; }
+  const equipesInput = document.getElementById('imp-equipes');
+  const calInput = document.getElementById('imp-calendario');
+  const equipesFile = equipesInput && equipesInput.files[0];
+  const calFile = calInput && calInput.files[0];
+  if(!equipesFile || !calFile){ showToast('Selecione o arquivo de escala de equipes e o de calendário antes de processar'); return; }
+
+  const equipesExt = getFileExt(equipesFile.name);
+  if(!['pdf','docx','xlsx','ods','csv'].includes(equipesExt)){ showToast('Formato de escala de equipes não suportado. Use PDF, DOCX, XLSX, ODS ou CSV.'); return; }
+  if(equipesExt === 'pdf' && !window.pdfjsLib){ showToast('Biblioteca de leitura de PDF não carregou. Verifique sua conexão e recarregue a página.'); return; }
+  if(equipesExt === 'docx' && !window.mammoth){ showToast('Biblioteca de leitura de DOCX não carregou. Verifique sua conexão e recarregue a página.'); return; }
+  if(['xlsx','ods','csv'].includes(equipesExt) && !window.XLSX){ showToast('Biblioteca de leitura de planilhas não carregou. Verifique sua conexão e recarregue a página.'); return; }
+
+  const calExt = getFileExt(calFile.name);
+  if(!['docx','xlsx','ods','csv'].includes(calExt)){ showToast('Formato de calendário não suportado. Use DOCX, XLSX, ODS ou CSV.'); return; }
+  if(calExt === 'docx' && !window.mammoth){ showToast('Biblioteca de leitura de DOCX não carregou. Verifique sua conexão e recarregue a página.'); return; }
+  if(calExt !== 'docx' && !window.XLSX){ showToast('Biblioteca de leitura de planilhas não carregou. Verifique sua conexão e recarregue a página.'); return; }
+
   const btn = document.getElementById('imp-process');
   if(btn){ btn.disabled = true; btn.textContent = 'Processando...'; }
   try{
     const [teams, calendarResult] = await Promise.all([
-      parseEquipesPdf(pdfFile),
-      parseCalendarioDocx(docxFile)
+      parseEquipesFile(equipesFile),
+      parseCalendarioFile(calFile)
     ]);
     openImportPreviewModal(teams, calendarResult.calendar, calendarResult.usedFallback);
   }catch(e){
@@ -657,6 +674,26 @@ async function processImportFiles(){
   }finally{
     if(btn){ btn.disabled = false; btn.textContent = 'Processar arquivos'; }
   }
+}
+
+// Detecta o formato do arquivo de escala de equipes pela extensão e direciona
+// ao parser correto. Todos devolvem o mesmo formato de saída: { A:[...], B:[...], C:[...], D:[...] }.
+async function parseEquipesFile(file){
+  const ext = getFileExt(file.name);
+  if(ext === 'pdf') return parseEquipesPdf(file);
+  if(ext === 'docx') return parseEquipesDocx(file);
+  if(ext === 'xlsx' || ext === 'ods' || ext === 'csv') return parseEquipesSpreadsheet(file);
+  throw new Error('Formato de escala de equipes não suportado (.'+(ext||'?')+'). Use PDF, DOCX, XLSX, ODS ou CSV.');
+}
+
+// Detecta o formato do arquivo de calendário pela extensão e direciona ao
+// parser correto. Os dois parsers (DOCX e planilha) sempre devolvem o mesmo
+// formato de saída: { calendar, usedFallback }.
+async function parseCalendarioFile(file){
+  const ext = getFileExt(file.name);
+  if(ext === 'docx') return parseCalendarioDocx(file);
+  if(ext === 'xlsx' || ext === 'ods' || ext === 'csv') return parseCalendarioSpreadsheet(file);
+  throw new Error('Formato de calendário não suportado (.'+(ext||'?')+'). Use DOCX, XLSX, ODS ou CSV.');
 }
 
 // --- PDF (escala de equipes) ---
@@ -727,6 +764,87 @@ function parseEquipesFromLines(lines){
   return teams;
 }
 
+// --- DOCX (escala de equipes) ---
+// Extrai texto simples do documento (sem tabela) e reaproveita o mesmo
+// parser de linhas usado no PDF, já que o formato do registro é o mesmo texto
+// corrido ("Equipe X" seguido de "Função - Patente. QP PM Nome, CPF ...").
+async function parseEquipesDocx(file){
+  const buf = await file.arrayBuffer();
+  const result = await window.mammoth.extractRawText({ arrayBuffer: buf });
+  const lines = result.value.split(/\r?\n/).map(l=>l.trim()).filter(Boolean);
+  return parseEquipesFromLines(lines);
+}
+
+// --- Planilha (escala de equipes: XLSX / ODS / CSV) ---
+// Aceita dois formatos: (1) estruturado, com colunas de cabeçalho
+// Equipe/Patente/Nome/CPF (em qualquer ordem/posição, em qualquer aba); ou
+// (2) texto corrido nas células, reaproveitando o mesmo parser de linhas do
+// PDF/DOCX (concatena as células de cada linha da planilha como se fossem
+// uma linha de texto extraída do documento).
+function tryParseStructuredEquipesRows(rows){
+  let headerRowIdx = -1, colMap = null;
+  for(let r=0; r<Math.min(rows.length, 30); r++){
+    const row = rows[r] || [];
+    const map = {};
+    row.forEach((cell, c)=>{
+      const t = String(cell==null?'':cell).trim().toUpperCase();
+      if(/^EQUIPE/.test(t)) map.equipe = c;
+      else if(/^PATENTE/.test(t)) map.patente = c;
+      else if(/^NOME/.test(t)) map.nome = c;
+      else if(/^CPF/.test(t)) map.cpf = c;
+    });
+    if(map.equipe!=null && map.nome!=null && map.cpf!=null){ headerRowIdx = r; colMap = map; break; }
+  }
+  if(headerRowIdx === -1) return null;
+
+  const teams = { A:[], B:[], C:[], D:[] };
+  for(let r=headerRowIdx+1; r<rows.length; r++){
+    const row = rows[r] || [];
+    const equipeRaw = colMap.equipe!=null ? String(row[colMap.equipe]==null?'':row[colMap.equipe]).trim().toUpperCase() : '';
+    const equipeMatch = equipeRaw.match(/([A-D])/);
+    if(!equipeMatch) continue;
+    const letter = equipeMatch[1];
+    const nome = colMap.nome!=null ? String(row[colMap.nome]==null?'':row[colMap.nome]).trim() : '';
+    const patente = colMap.patente!=null ? String(row[colMap.patente]==null?'':row[colMap.patente]).trim() : '';
+    const cpf = colMap.cpf!=null ? String(row[colMap.cpf]==null?'':row[colMap.cpf]).trim().toUpperCase() : '';
+    if(!nome && !cpf) continue;
+    teams[letter].push({ nome, patente, cpf, cpfSuspeito: !isValidCpfShape(cpf) });
+  }
+  return teams;
+}
+
+async function parseEquipesSpreadsheet(file){
+  const ext = getFileExt(file.name);
+  let workbook;
+  if(ext === 'csv'){
+    const text = await file.text();
+    workbook = window.XLSX.read(text, { type: 'string' });
+  } else {
+    const buf = await file.arrayBuffer();
+    workbook = window.XLSX.read(new Uint8Array(buf), { type: 'array' });
+  }
+
+  for(const sheetName of workbook.SheetNames){
+    const sheet = workbook.Sheets[sheetName];
+    const rows = window.XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: '' });
+    const structured = tryParseStructuredEquipesRows(rows);
+    if(structured) return structured;
+  }
+
+  // Nenhuma aba tinha cabeçalho estruturado reconhecível: trata cada linha
+  // da planilha como texto corrido e reaproveita o parser de linhas do PDF.
+  const lines = [];
+  for(const sheetName of workbook.SheetNames){
+    const sheet = workbook.Sheets[sheetName];
+    const rows = window.XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: '' });
+    for(const row of rows){
+      const text = (row||[]).map(c=> String(c==null?'':c).trim()).filter(Boolean).join(' ');
+      if(text) lines.push(text);
+    }
+  }
+  return parseEquipesFromLines(lines);
+}
+
 // --- DOCX (calendário mensal) ---
 
 const MESES_PT = ['JANEIRO','FEVEREIRO','MARÇO','ABRIL','MAIO','JUNHO','JULHO','AGOSTO','SETEMBRO','OUTUBRO','NOVEMBRO','DEZEMBRO'];
@@ -780,6 +898,103 @@ async function parseCalendarioDocx(file){
     if(!dm) continue; // linha de cabeçalho ou vazia
     const dateStr = year+'-'+dm[2].padStart(2,'0')+'-'+dm[1].padStart(2,'0');
     calendar[dateStr] = { dia: (cells[2]||'').toUpperCase(), noite: (cells[3]||'').toUpperCase() };
+  }
+
+  return { calendar, usedFallback };
+}
+
+// --- Planilha (XLSX / ODS / CSV) ---
+
+// Converte uma célula de data em {day, month}, aceitando tanto texto "dd/mm"
+// quanto data serializada do Excel/ODS (célula formatada como data).
+function excelCellToDayMonth(val){
+  if(val instanceof Date && !isNaN(val)){
+    return { day: val.getDate(), month: val.getMonth()+1 };
+  }
+  if(typeof val === 'number' && window.XLSX && window.XLSX.SSF){
+    try{
+      const parsed = window.XLSX.SSF.parse_date_code(val);
+      if(parsed) return { day: parsed.d, month: parsed.m };
+    }catch(e){}
+  }
+  const s = String(val==null ? '' : val).trim();
+  const m = s.match(/^(\d{1,2})\/(\d{1,2})/);
+  if(m) return { day: parseInt(m[1],10), month: parseInt(m[2],10) };
+  return null;
+}
+
+// A planilha pode ter várias abas (uma por mês) e, dentro de uma aba, duas
+// tabelas lado a lado (RPA/COPOM e DPM, separadas por uma coluna em branco).
+// Localizamos todas as células de título "RPA/COPOM" (a tabela DPM é
+// ignorada por não ter turno Noite estruturado) em todas as abas, escolhemos
+// a que bate com o mês/ano atual (mesma lógica usada no DOCX) e extraímos os
+// dados a partir da linha de cabeçalho "Data" logo abaixo do título.
+async function parseCalendarioSpreadsheet(file){
+  const ext = getFileExt(file.name);
+  let workbook;
+  if(ext === 'csv'){
+    const text = await file.text();
+    workbook = window.XLSX.read(text, { type: 'string' });
+  } else {
+    const buf = await file.arrayBuffer();
+    workbook = window.XLSX.read(new Uint8Array(buf), { type: 'array', cellDates: true });
+  }
+
+  const today = new Date();
+  const currentMonthName = MESES_PT[today.getMonth()];
+  const currentYear = String(today.getFullYear());
+
+  const candidates = [];
+  for(const sheetName of workbook.SheetNames){
+    const sheet = workbook.Sheets[sheetName];
+    const rows = window.XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true, defval: '' });
+    for(let r=0; r<rows.length; r++){
+      const row = rows[r] || [];
+      for(let c=0; c<row.length; c++){
+        const text = (row[c]==null ? '' : String(row[c])).toUpperCase();
+        if(/RPA/.test(text) && /COPOM/.test(text)){
+          candidates.push({ sheetName, rows, row: r, col: c, titleText: text });
+        }
+      }
+    }
+  }
+  if(candidates.length === 0) throw new Error('Nenhuma tabela "Equipes RPA/COPOM" encontrada na planilha');
+
+  let chosen = candidates[0];
+  let usedFallback = candidates.length > 1;
+  if(candidates.length > 1){
+    const match = candidates.find(c=> c.titleText.includes(currentMonthName) && c.titleText.includes(currentYear));
+    if(match){ chosen = match; usedFallback = false; }
+  }
+
+  const yearMatch = chosen.titleText.match(/(\d{4})/);
+  const year = yearMatch ? parseInt(yearMatch[1],10) : today.getFullYear();
+
+  // Localiza a linha de cabeçalho ("Data") logo abaixo do título, na mesma coluna.
+  const rows = chosen.rows;
+  let headerRow = -1;
+  for(let r = chosen.row+1; r < Math.min(chosen.row+5, rows.length); r++){
+    const cell = rows[r] && rows[r][chosen.col];
+    if(cell!=null && /^DATA$/i.test(String(cell).trim())){ headerRow = r; break; }
+  }
+  if(headerRow === -1) throw new Error('Não foi possível localizar o cabeçalho da tabela RPA/COPOM (linha "Data")');
+
+  // Ordem de colunas a partir do título, conforme o padrão da planilha:
+  // Data, Dia semana, Dia, Noite, Descanso(24h), Folga(48h).
+  const dataCol = chosen.col, diaCol = chosen.col+2, noiteCol = chosen.col+3;
+  const calendar = {};
+  for(let r = headerRow+1; r < rows.length; r++){
+    const row = rows[r] || [];
+    const dm = excelCellToDayMonth(row[dataCol]);
+    if(!dm){
+      const next = rows[r+1] || [];
+      if(!excelCellToDayMonth(next[dataCol])) break; // duas linhas em branco seguidas = fim da tabela
+      continue;
+    }
+    const dateStr = year+'-'+String(dm.month).padStart(2,'0')+'-'+String(dm.day).padStart(2,'0');
+    const dia = row[diaCol]!=null ? String(row[diaCol]).trim().toUpperCase() : '';
+    const noite = row[noiteCol]!=null ? String(row[noiteCol]).trim().toUpperCase() : '';
+    calendar[dateStr] = { dia, noite };
   }
 
   return { calendar, usedFallback };
