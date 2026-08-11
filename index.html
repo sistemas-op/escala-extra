@@ -232,8 +232,9 @@ function renderVagas(){
   const el = document.getElementById('view-vagas');
   const today = new Date(); today.setHours(0,0,0,0);
   const upcoming = shifts.filter(s=>{ const [y,m,d]=s.date.split('-').map(Number); return new Date(y,m-1,d) >= today; });
+  const openCount = upcoming.filter(s=> signupsFor(s.id).length < s.vagas).length;
 
-  let html = '<div class="refresh-row"><span class="muted-sm">'+upcoming.length+' vaga(s) em aberto</span><button class="link-btn" onclick="refreshAll()">Atualizar</button></div>';
+  let html = '<div class="refresh-row"><span class="muted-sm">'+openCount+' vaga(s) em aberto</span><button class="link-btn" onclick="refreshAll()">Atualizar</button></div>';
 
   if(upcoming.length === 0){
     html += '<div class="card empty"><div class="big">Nenhuma vaga cadastrada</div>Assim que a administração publicar horários, eles aparecem aqui.</div>';
