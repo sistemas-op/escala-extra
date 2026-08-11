@@ -450,15 +450,22 @@ function openCancelModal(shiftId){
     + '<h3>Cancelar voluntariado</h3>'
     + '<div class="shift-local" style="margin-bottom:14px;">'+dp.dnum+'/'+dp.mon+' &middot; '+s.startTime+'–'+s.endTime+(metaLine(s)?(' &middot; '+metaLine(s)):'')+'</div>'
     + '<div class="field"><label>Digite o nome que você usou pra se voluntariar</label><input id="cn-nome" list="datalist-nomes" placeholder="Ex: Sd Eduardo Silva" autofocus></div>'
+    + '<div class="field"><label>CPF</label><input id="cn-cpf" placeholder="000.000.000-00" maxlength="14" inputmode="numeric"></div>'
     + '<div class="modal-actions"><button class="btn btn-ghost" id="cn-cancel">Voltar</button><button class="btn btn-danger" id="cn-confirm">Cancelar minha vaga</button></div>'
     + '</div>';
   document.body.appendChild(bg);
+  const cnCpfInput = bg.querySelector('#cn-cpf');
+  cnCpfInput.oninput = ()=>{ cnCpfInput.value = maskCpf(cnCpfInput.value); };
   bg.querySelector('#cn-cancel').onclick = ()=> bg.remove();
   bg.querySelector('#cn-confirm').onclick = ()=>{
     const nome = bg.querySelector('#cn-nome').value.trim();
+    const cpfDigits = cnCpfInput.value.replace(/\D/g,'');
     if(!nome){ showToast('Digite seu nome'); return; }
+    if(cpfDigits.length !== 11){ showToast('Digite um CPF válido'); return; }
     const match = signupsFor(shiftId).find(x=>x.nome.toLowerCase()===nome.toLowerCase());
     if(!match){ showToast('Nome não encontrado nesta vaga'); return; }
+    const matchCpfDigits = (match.cpf||'').replace(/\D/g,'');
+    if(matchCpfDigits !== cpfDigits){ showToast('CPF não confere com o cadastro desta vaga'); return; }
     const removedId = match.id;
     signups = signups.filter(x=>x.id!==removedId);
     bg.remove();
