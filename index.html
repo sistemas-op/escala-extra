@@ -97,7 +97,7 @@
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
-import { getFirestore, doc, onSnapshot, setDoc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { getFirestore, doc, onSnapshot, setDoc, updateDoc, getDoc, deleteField } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyDINaHpd3Ig0JzlLe3TK_MQbICETdrQv1o",
@@ -133,17 +133,59 @@ function metaLine(s){ const parts=[]; if(s.local) parts.push(s.local); if(s.viat
 function sortShifts(){ shifts.sort((a,b)=> (a.date+a.startTime).localeCompare(b.date+b.startTime)); }
 
 // ---------- FIRESTORE SYNC (documento único: escala/estado) ----------
+// shifts e signups são guardados no documento como MAPAS (objeto id -> item),
+// não como arrays. Isso permite gravar/apagar um item por vez (merge por
+// caminho de campo), então duas abas mexendo em itens diferentes ao mesmo
+// tempo nunca sobrescrevem uma a outra — só o item alterado é tocado.
 
 function applyRemoteData(data){
   currentPin = data.pin ?? null;
-  shifts = (data.shifts || []).slice();
+  shifts = Object.values(data.shifts || {}).map(s=>({...s}));
   shifts.forEach(s=>{ if(!s.fase) s.fase='sgt'; });
   sortShifts();
-  signups = (data.signups || []).slice();
+  signups = Object.values(data.signups || {}).map(s=>({...s}));
 }
 
+function handlePersistError(e){
+  console.error(e);
+  showToast('Erro ao sincronizar com o servidor');
+}
+
+// Grava/atualiza campos de nível superior (ex: pin) preservando os demais.
 function persist(patch){
-  setDoc(docRef, patch, { merge: true }).catch(e=>{ console.error(e); showToast('Erro ao sincronizar com o servidor'); });
+  setDoc(docRef, patch, { merge: true }).catch(handlePersistError);
+}
+
+// Upsert/delete granulares: tocam só a chave do item alterado dentro do
+// mapa shifts/signups, sem substituir o mapa inteiro.
+function persistShiftUpsert(shift){
+  setDoc(docRef, { shifts: { [shift.id]: shift } }, { merge: true }).catch(handlePersistError);
+}
+function persistShiftDelete(id, cascadeSignupIds){
+  const patch = { shifts: { [id]: deleteField() } };
+  if(cascadeSignupIds && cascadeSignupIds.length){
+    patch.signups = {};
+    cascadeSignupIds.forEach(sid=>{ patch.signups[sid] = deleteField(); });
+  }
+  setDoc(docRef, patch, { merge: true }).catch(handlePersistError);
+}
+function persistSignupUpsert(su){
+  setDoc(docRef, { signups: { [su.id]: su } }, { merge: true }).catch(handlePersistError);
+}
+function persistSignupDelete(id){
+  setDoc(docRef, { signups: { [id]: deleteField() } }, { merge: true }).catch(handlePersistError);
+}
+// Bulk upsert (ex: dados de exemplo): mescla várias chaves novas de uma vez.
+function persistBulkUpsert(newShifts, newSignups){
+  const patch = {};
+  if(newShifts && newShifts.length){ patch.shifts = {}; newShifts.forEach(s=>{ patch.shifts[s.id] = s; }); }
+  if(newSignups && newSignups.length){ patch.signups = {}; newSignups.forEach(su=>{ patch.signups[su.id] = su; }); }
+  setDoc(docRef, patch, { merge: true }).catch(handlePersistError);
+}
+// "Apagar tudo": substitui os mapas inteiros por vazios (precisa de
+// updateDoc, já que setDoc com merge:true e {} não apaga chaves existentes).
+function persistWipeAll(){
+  updateDoc(docRef, { shifts: {}, signups: {} }).catch(handlePersistError);
 }
 
 async function refreshAll(){
@@ -235,7 +277,7 @@ function openSignupModal(shiftId){
     bg.remove();
     showToast('Voluntariado confirmado!');
     render();
-    persist({ signups });
+    persistSignupUpsert(entry);
   };
 }
 
@@ -258,11 +300,12 @@ function openCancelModal(shiftId){
     if(!nome){ showToast('Digite seu nome'); return; }
     const match = signupsFor(shiftId).find(x=>x.nome.toLowerCase()===nome.toLowerCase());
     if(!match){ showToast('Nome não encontrado nesta vaga'); return; }
-    signups = signups.filter(x=>x.id!==match.id);
+    const removedId = match.id;
+    signups = signups.filter(x=>x.id!==removedId);
     bg.remove();
     showToast('Voluntariado cancelado');
     render();
-    persist({ signups });
+    persistSignupDelete(removedId);
   };
 }
 
@@ -270,7 +313,7 @@ function removeSignup(id){
   signups = signups.filter(x=>x.id!==id);
   render();
   showToast('Removido');
-  persist({ signups });
+  persistSignupDelete(id);
 }
 
 function advanceFase(shiftId){
@@ -279,7 +322,7 @@ function advanceFase(shiftId){
   s.fase = nextFase(s.fase);
   showToast('Liberado para: '+RANK_LABEL[s.fase]);
   render();
-  persist({ shifts });
+  persistShiftUpsert(s);
 }
 
 // ---------- ADMIN ----------
@@ -402,11 +445,12 @@ function renderAdmin(){
       const viatura = el.querySelector('#nf-viatura').value.trim();
       const fase = el.querySelector('#nf-fase').value;
       if(!date || !start || !end){ showToast('Preencha data e horários'); return; }
-      shifts.push({ id: uid(), date, startTime: start, endTime: end, vagas, local, viatura, fase });
+      const newShift = { id: uid(), date, startTime: start, endTime: end, vagas, local, viatura, fase };
+      shifts.push(newShift);
       sortShifts();
       showToast('Vaga adicionada');
       render();
-      persist({ shifts });
+      persistShiftUpsert(newShift);
     };
   }
   const efCancel = el.querySelector('#ef-cancel');
@@ -426,7 +470,7 @@ function renderAdmin(){
       sortShifts();
       showToast('Vaga atualizada');
       render();
-      persist({ shifts });
+      persistShiftUpsert(s);
     };
   }
   const lockBtn = el.querySelector('#lock-btn');
@@ -443,7 +487,7 @@ function editSignupName(id, newName){
   su.nome = newName;
   showToast('Nome atualizado');
   render();
-  persist({ signups });
+  persistSignupUpsert(su);
 }
 function editSignupPatente(id, newPatente){
   const su = signups.find(x=>x.id===id);
@@ -451,16 +495,17 @@ function editSignupPatente(id, newPatente){
   su.patente = newPatente;
   showToast('Patente atualizada');
   render();
-  persist({ signups });
+  persistSignupUpsert(su);
 }
 
 function deleteShift(id){
   if(!confirm('Excluir esta vaga? Os voluntários cadastrados nela também serão removidos.')) return;
+  const cascadeIds = signups.filter(s=>s.shiftId===id).map(s=>s.id);
   shifts = shifts.filter(s=>s.id!==id);
   signups = signups.filter(s=>s.shiftId!==id);
   showToast('Vaga excluída');
   render();
-  persist({ shifts, signups });
+  persistShiftDelete(id, cascadeIds);
 }
 
 function loadDemoData(){
@@ -485,7 +530,7 @@ function loadDemoData(){
   signups.push(...demoSignups);
   showToast('Exemplo carregado');
   render();
-  persist({ shifts, signups });
+  persistBulkUpsert([s1, s2, s3], demoSignups);
 }
 
 function clearAllData(){
@@ -494,7 +539,7 @@ function clearAllData(){
   signups = [];
   showToast('Tudo apagado');
   render();
-  persist({ shifts, signups });
+  persistWipeAll();
 }
 
 function render(){ renderVagas(); renderAdmin(); }
@@ -527,19 +572,31 @@ window.editSignupPatente = editSignupPatente;
 
 render();
 
+let unsubscribeRealtime = null;
+
+function attachRealtimeListener(){
+  if(unsubscribeRealtime) return; // já anexado — nunca duplica o listener
+  unsubscribeRealtime = onSnapshot(docRef, (snap)=>{
+    try{
+      if(!snap.exists()){
+        setDoc(docRef, { pin: null, shifts: {}, signups: {} }, { merge: true }).catch(e=>console.error(e));
+        return; // o próprio setDoc acima vai disparar este listener de novo
+      }
+      applyRemoteData(snap.data());
+      render();
+    }catch(e){
+      console.error('Erro ao processar atualização em tempo real:', e);
+    }
+  }, (err)=>{
+    console.error('Erro no listener em tempo real:', err);
+    showToast('Erro de sincronização em tempo real');
+  });
+}
+
 (async function init(){
   try{ await signInAnonymously(auth); }
   catch(e){ console.error(e); showToast('Erro ao conectar. Verifique sua conexão.'); }
-
-  onSnapshot(docRef, async (snap)=>{
-    if(!snap.exists()){
-      try{ await setDoc(docRef, { pin: null, shifts: [], signups: [] }); }
-      catch(e){ console.error(e); }
-      return;
-    }
-    applyRemoteData(snap.data());
-    render();
-  }, (err)=>{ console.error(err); showToast('Erro de sincronização em tempo real'); });
+  attachRealtimeListener();
 })();
 </script>
 </body>
