@@ -425,7 +425,7 @@ function renderAdmin(){
   }
   html += '</div>';
 
-  html += '<button class="btn btn-ghost btn-block" id="lock-btn">Sair da administração</button>';
+  html += '<div class="modal-actions"><button class="btn btn-ghost" id="change-pin-btn">Trocar PIN</button><button class="btn btn-ghost" id="lock-btn">Sair da administração</button></div>';
 
   el.innerHTML = html;
 
@@ -475,6 +475,34 @@ function renderAdmin(){
   }
   const lockBtn = el.querySelector('#lock-btn');
   if(lockBtn){ lockBtn.onclick = ()=>{ adminUnlocked = false; render(); }; }
+  const changePinBtn = el.querySelector('#change-pin-btn');
+  if(changePinBtn){ changePinBtn.onclick = openChangePinModal; }
+}
+
+function openChangePinModal(){
+  const bg = document.createElement('div');
+  bg.className = 'modal-bg';
+  bg.innerHTML = '<div class="modal">'
+    + '<h3>Trocar PIN</h3>'
+    + '<div class="field"><label>PIN atual</label><input id="cp-atual" type="tel" maxlength="8" placeholder="••••" autofocus></div>'
+    + '<div class="field"><label>Novo PIN</label><input id="cp-novo" type="tel" maxlength="8" placeholder="••••"></div>'
+    + '<div class="field"><label>Confirmar novo PIN</label><input id="cp-confirma" type="tel" maxlength="8" placeholder="••••"></div>'
+    + '<div class="modal-actions"><button class="btn btn-ghost" id="cp-cancel">Cancelar</button><button class="btn btn-primary" id="cp-confirm">Salvar</button></div>'
+    + '</div>';
+  document.body.appendChild(bg);
+  bg.querySelector('#cp-cancel').onclick = ()=> bg.remove();
+  bg.querySelector('#cp-confirm').onclick = ()=>{
+    const atual = bg.querySelector('#cp-atual').value.trim();
+    const novo = bg.querySelector('#cp-novo').value.trim();
+    const confirma = bg.querySelector('#cp-confirma').value.trim();
+    if(atual !== currentPin){ showToast('PIN atual incorreto'); return; }
+    if(!novo){ showToast('Digite o novo PIN'); return; }
+    if(novo !== confirma){ showToast('Os PINs não coincidem'); return; }
+    currentPin = novo;
+    bg.remove();
+    showToast('PIN atualizado');
+    persist({ pin: novo });
+  };
 }
 
 function startEditShift(id){ editingShiftId = id; render(); }
