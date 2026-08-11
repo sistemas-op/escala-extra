@@ -933,7 +933,13 @@ async function parseCalendarioDocx(file){
 // quanto data serializada do Excel/ODS (célula formatada como data).
 function excelCellToDayMonth(val){
   if(val instanceof Date && !isNaN(val)){
-    return { day: val.getDate(), month: val.getMonth()+1 };
+    // A SheetJS (cellDates:true) cria o Date de uma célula de data ancorado em
+    // UTC meia-noite (Date.UTC internamente). Ler com getDate()/getMonth()
+    // (getters em fuso LOCAL) faz o dia "voltar" em fusos atrás de UTC (ex:
+    // Brasil, UTC-3) — 01/08 UTC vira 31/07 23:59 no navegador. Por isso
+    // usamos os getters UTC, que refletem o dia/mês exatamente como estavam
+    // na planilha, sem depender do fuso horário do navegador.
+    return { day: val.getUTCDate(), month: val.getUTCMonth()+1 };
   }
   if(typeof val === 'number' && window.XLSX && window.XLSX.SSF){
     try{
@@ -1146,7 +1152,10 @@ function loadDemoData(){
   const d1 = new Date(today); d1.setDate(d1.getDate()+3);
   const d2 = new Date(today); d2.setDate(d2.getDate()+5);
   const d3 = new Date(today); d3.setDate(d3.getDate()+7);
-  const fmt = (d)=> d.toISOString().slice(0,10);
+  // Monta 'YYYY-MM-DD' a partir dos getters locais (mesmo padrão usado em
+  // shiftDateStr/fmtDateParts) em vez de toISOString(), que converte para UTC
+  // e pode voltar a data em 1 dia em fusos atrás de UTC (ex: Brasil, UTC-3).
+  const fmt = (d)=> d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
   const s1 = { id: uid(), date: fmt(d1), startTime:'08:00', endTime:'14:00', local:'Batalhão Central', viatura:'1204', vagas:3, fase:'cabo' };
   const s2 = { id: uid(), date: fmt(d2), startTime:'19:00', endTime:'23:00', local:'Evento - Estádio', viatura:'0817', vagas:2, fase:'soldado' };
   const s3 = { id: uid(), date: fmt(d3), startTime:'06:00', endTime:'12:00', local:'Operação Rodovia', viatura:'', vagas:4, fase:'sgt' };
