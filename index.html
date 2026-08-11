@@ -148,6 +148,7 @@ let adminUnlocked = false;
 let currentPin = null;
 let editingShiftId = null;
 let activeTab = 'vagas';
+let importFormOpen = false; // true enquanto o admin está substituindo a escala oficial já importada
 let escalaOficial = null;      // { A:[{nome,patente,cpf}], B:[...], C:[...], D:[...] }
 let calendarioOficial = null;  // { 'YYYY-MM-DD': { dia:'A', noite:'B' }, ... }
 
@@ -471,16 +472,35 @@ function renderAdmin(){
     + '<button class="btn btn-danger btn-sm" id="clear-btn">Apagar tudo</button>'
     + '</div>';
 
+  const hasEscalaOficial = !!(escalaOficial && calendarioOficial && Object.keys(calendarioOficial).length > 0);
+
   html += '<div class="card">'
-    + '<div style="font-family:\'Oswald\',sans-serif;text-transform:uppercase;font-size:14px;margin-bottom:10px;">Importar Escala Mensal</div>'
-    + '<div class="muted-sm" style="margin-bottom:10px;">Envie a escala de equipes e o calendário mensal para cruzar com os voluntariados extras e evitar que alguém se voluntarie enquanto já está de serviço normal.</div>'
-    + '<div class="field"><label>Escala de equipes (PDF, DOCX, XLSX, ODS ou CSV)</label><input type="file" id="imp-equipes" accept=".pdf,.docx,.xlsx,.ods,.csv"></div>'
-    + '<div class="field"><label>Calendário mensal (DOCX, XLSX, ODS ou CSV)</label><input type="file" id="imp-calendario" accept=".docx,.xlsx,.ods,.csv"></div>'
-    + '<button class="btn btn-primary btn-block" id="imp-process">Processar arquivos</button>'
-    + (escalaOficial && calendarioOficial
-        ? '<div class="muted-sm" style="margin-top:8px;">Escala oficial carregada: '+TEAM_LETTERS.map(l=>(escalaOficial[l]||[]).length).reduce((a,b)=>a+b,0)+' policial(is) em '+TEAM_LETTERS.length+' equipes, '+Object.keys(calendarioOficial).length+' dia(s) de calendário.</div>'
-        : '<div class="muted-sm" style="margin-top:8px;">Nenhuma escala oficial importada ainda — o cruzamento de conflitos fica desativado até a importação.</div>')
-    + '</div>';
+    + '<div style="font-family:\'Oswald\',sans-serif;text-transform:uppercase;font-size:14px;margin-bottom:10px;">Importar Escala Mensal</div>';
+
+  if(hasEscalaOficial && !importFormOpen){
+    const totalPoliciais = TEAM_LETTERS.map(l=>(escalaOficial[l]||[]).length).reduce((a,b)=>a+b,0);
+    const dias = Object.keys(calendarioOficial).sort();
+    let periodoLabel = '';
+    if(dias.length > 0){
+      const [yFirst,mFirst] = dias[0].split('-');
+      const [yLast,mLast] = dias[dias.length-1].split('-');
+      if(yFirst === yLast && mFirst === mLast){
+        const mesNome = MESES_PT[parseInt(mFirst,10)-1] || '';
+        periodoLabel = ' (referente a '+(mesNome.charAt(0)+mesNome.slice(1).toLowerCase())+'/'+yFirst+')';
+      } else {
+        periodoLabel = ' ('+dias[0]+' a '+dias[dias.length-1]+')';
+      }
+    }
+    html += '<div class="muted-sm" style="margin-bottom:10px;">Escala importada: Equipes '+TEAM_LETTERS.join(', ')+' ('+totalPoliciais+' policial(is) no total) &middot; Calendário: '+dias.length+' dia(s) mapeado(s)'+periodoLabel+'.</div>'
+      + '<button class="btn btn-ghost btn-sm" id="imp-replace-btn">Substituir escala</button>';
+  } else {
+    html += '<div class="muted-sm" style="margin-bottom:10px;">Envie a escala de equipes e o calendário mensal para cruzar com os voluntariados extras e evitar que alguém se voluntarie enquanto já está de serviço normal.</div>'
+      + '<div class="field"><label>Escala de equipes (PDF, DOCX, XLSX, ODS ou CSV)</label><input type="file" id="imp-equipes" accept=".pdf,.docx,.xlsx,.ods,.csv"></div>'
+      + '<div class="field"><label>Calendário mensal (DOCX, XLSX, ODS ou CSV)</label><input type="file" id="imp-calendario" accept=".docx,.xlsx,.ods,.csv"></div>'
+      + '<button class="btn btn-primary btn-block" id="imp-process">Processar arquivos</button>'
+      + (hasEscalaOficial ? '<button class="link-btn" style="margin-top:8px;" id="imp-cancel-replace">Cancelar</button>' : '<div class="muted-sm" style="margin-top:8px;">Nenhuma escala oficial importada ainda — o cruzamento de conflitos fica desativado até a importação.</div>');
+  }
+  html += '</div>';
 
   html += '<div class="card">'
     + '<div style="font-family:\'Oswald\',sans-serif;text-transform:uppercase;font-size:14px;margin-bottom:10px;">Nova vaga</div>'
@@ -563,6 +583,10 @@ function renderAdmin(){
   if(clearBtn){ clearBtn.onclick = clearAllData; }
   const impProcessBtn = el.querySelector('#imp-process');
   if(impProcessBtn){ impProcessBtn.onclick = processImportFiles; }
+  const impReplaceBtn = el.querySelector('#imp-replace-btn');
+  if(impReplaceBtn){ impReplaceBtn.onclick = ()=>{ importFormOpen = true; render(); }; }
+  const impCancelReplaceBtn = el.querySelector('#imp-cancel-replace');
+  if(impCancelReplaceBtn){ impCancelReplaceBtn.onclick = ()=>{ importFormOpen = false; render(); }; }
 
   const addBtn = el.querySelector('#nf-add');
   if(addBtn){
@@ -1077,6 +1101,7 @@ function openImportPreviewModal(teams, calendar, calendarFallback){
 
     escalaOficial = finalTeams;
     calendarioOficial = finalCalendar;
+    importFormOpen = false;
     bg.remove();
     showToast('Escala oficial importada e salva');
     render();
