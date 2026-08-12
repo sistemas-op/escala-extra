@@ -433,6 +433,18 @@ function openSignupModal(shiftId){
       showToast('Você já está escalado no serviço normal neste dia (Equipe '+conflict.equipe+', turno '+conflict.turnoLabel+'). Não é possível se voluntariar.');
       return;
     }
+    const [vagaAno, vagaMes] = freshShift.date.split('-');
+    const extrasNoMes = signups.filter(x=>{
+      if((x.cpf||'').replace(/\D/g,'') !== cpfDigits) return false;
+      const xs = shifts.find(sh=>sh.id===x.shiftId);
+      if(!xs) return false;
+      const [xAno, xMes] = xs.date.split('-');
+      return xAno===vagaAno && xMes===vagaMes;
+    }).length;
+    if(extrasNoMes >= 10){
+      showToast('Limite de 10 extras no mês atingido para este CPF.');
+      return;
+    }
     const entry = { id: uid(), shiftId, nome, patente, cpf: cpfMasked, timestamp: new Date().toISOString() };
     signups.push(entry);
     bg.remove();
@@ -527,6 +539,7 @@ function renderAdmin(){
 
   let html = '<div class="card" style="display:flex;gap:8px;flex-wrap:wrap;">'
     + '<button class="btn btn-blue btn-sm" id="demo-btn">Carregar exemplo</button>'
+    + '<button class="btn btn-blue btn-sm" id="export-xlsx-btn">Gerar planilha (Excel)</button>'
     + '<button class="btn btn-danger btn-sm" id="clear-btn">Apagar tudo</button>'
     + '</div>';
 
@@ -638,6 +651,8 @@ function renderAdmin(){
 
   const demoBtn = el.querySelector('#demo-btn');
   if(demoBtn){ demoBtn.onclick = loadDemoData; }
+  const exportBtn = el.querySelector('#export-xlsx-btn');
+  if(exportBtn){ exportBtn.onclick = exportEscalaXlsx; }
   const clearBtn = el.querySelector('#clear-btn');
   if(clearBtn){ clearBtn.onclick = clearAllData; }
   const impProcessBtn = el.querySelector('#imp-process');
@@ -1194,6 +1209,58 @@ function editSignupPatente(id, newPatente){
   showToast('Patente atualizada');
   render();
   persistSignupUpsert(su);
+}
+
+// ---------- EXPORTAÇÃO DA ESCALA (XLSX) ----------
+
+function exportEscalaXlsx(){
+  if(!window.XLSX){ showToast('Biblioteca de planilhas não carregou. Recarregue a página.'); return; }
+
+  const today = new Date(); today.setHours(0,0,0,0);
+  const upcoming = shifts
+    .filter(s=>{ const [y,m,d]=s.date.split('-').map(Number); return new Date(y,m-1,d) >= today; })
+    .slice()
+    .sort((a,b)=> (a.date+a.startTime).localeCompare(b.date+b.startTime));
+
+  const headers = ['Data','Dia da semana','Horário','Local','Viatura','Liberado para','Nome do voluntário','Patente'];
+  const rows = [headers];
+
+  for(const s of upcoming){
+    const dp = fmtDateParts(s.date);
+    const [y,m,d] = s.date.split('-');
+    const dataFmt = d+'/'+m+'/'+y;
+    const horario = s.startTime+'–'+s.endTime;
+    const su = signupsFor(s.id);
+    if(su.length === 0){
+      rows.push([dataFmt, dp.dow, horario, s.local||'', s.viatura||'', faseLabel(s.fase), '', '']);
+    } else {
+      for(const x of su){
+        rows.push([dataFmt, dp.dow, horario, s.local||'', s.viatura||'', faseLabel(s.fase), x.nome, RANK_LABEL[x.patente]||x.patente||'']);
+      }
+    }
+  }
+
+  const ws = window.XLSX.utils.aoa_to_sheet(rows);
+  // Largura de coluna aproximada (em "caracteres"), suportada na versão
+  // gratuita da SheetJS. Negrito no cabeçalho exigiria estilo de célula
+  // (propriedade .s), que não é suportado na build community/gratuita do
+  // XLSX usada aqui — por isso o cabeçalho fica só como texto normal mesmo.
+  ws['!cols'] = [
+    { wch: 12 }, // Data
+    { wch: 14 }, // Dia da semana
+    { wch: 14 }, // Horário
+    { wch: 24 }, // Local
+    { wch: 10 }, // Viatura
+    { wch: 26 }, // Liberado para
+    { wch: 26 }, // Nome do voluntário
+    { wch: 12 }, // Patente
+  ];
+
+  const wb = window.XLSX.utils.book_new();
+  window.XLSX.utils.book_append_sheet(wb, ws, 'Escala Extra');
+
+  const todayStr = today.getFullYear()+'-'+String(today.getMonth()+1).padStart(2,'0')+'-'+String(today.getDate()).padStart(2,'0');
+  window.XLSX.writeFile(wb, 'escala-extra-'+todayStr+'.xlsx');
 }
 
 function deleteShift(id){
