@@ -1224,21 +1224,43 @@ function exportEscalaXlsx(){
 
   const headers = ['Data','Dia da semana','Horário','Local','Viatura','Liberado para','Nome do voluntário','Patente'];
   const rows = [headers];
+  const merges = [];
+  const vagaBlocks = []; // {startRow,endRow} de cada vaga — usado pra cor alternada
+  const MERGE_COLS = [0,1,2,3,4,5]; // Data..Liberado para (Nome/Patente ficam por linha)
 
-  for(const s of upcoming){
+  upcoming.forEach((s, vagaIdx)=>{
     const dp = fmtDateParts(s.date);
     const [y,m,d] = s.date.split('-');
     const dataFmt = d+'/'+m+'/'+y;
     const horario = s.startTime+'–'+s.endTime;
     const su = signupsFor(s.id);
+    const startRow = rows.length;
+
     if(su.length === 0){
       rows.push([dataFmt, dp.dow, horario, s.local||'', s.viatura||'', faseLabel(s.fase), '', '']);
     } else {
-      for(const x of su){
-        rows.push([dataFmt, dp.dow, horario, s.local||'', s.viatura||'', faseLabel(s.fase), x.nome, RANK_LABEL[x.patente]||x.patente||'']);
-      }
+      su.forEach((x, i)=>{
+        // Só a primeira linha do bloco leva os dados da vaga — as demais
+        // ficam com essas colunas vazias, pois serão cobertas pela célula
+        // mesclada (!merges) logo abaixo.
+        rows.push(i===0
+          ? [dataFmt, dp.dow, horario, s.local||'', s.viatura||'', faseLabel(s.fase), x.nome, RANK_LABEL[x.patente]||x.patente||'']
+          : ['', '', '', '', '', '', x.nome, RANK_LABEL[x.patente]||x.patente||'']);
+      });
     }
-  }
+
+    const endRow = rows.length - 1;
+    vagaBlocks.push({ startRow, endRow });
+    if(su.length > 1){
+      MERGE_COLS.forEach(c=>{ merges.push({ s:{r:startRow,c}, e:{r:endRow,c} }); });
+    }
+
+    // Linha em branco entre uma vaga e a próxima, pra separar visualmente
+    // (ver nota sobre cor de fundo mais abaixo).
+    if(vagaIdx < upcoming.length - 1){
+      rows.push(['', '', '', '', '', '', '', '']);
+    }
+  });
 
   const ws = window.XLSX.utils.aoa_to_sheet(rows);
   // Largura de coluna aproximada (em "caracteres"), suportada na versão
@@ -1255,6 +1277,43 @@ function exportEscalaXlsx(){
     { wch: 26 }, // Nome do voluntário
     { wch: 12 }, // Patente
   ];
+
+  // Mescla verticalmente Data/Dia da semana/Horário/Local/Viatura/Liberado
+  // para ao longo das linhas de voluntários de cada vaga com mais de um
+  // voluntário. Nome e Patente permanecem distintos por linha.
+  ws['!merges'] = merges;
+
+  // Cabeçalho fixo ao rolar (freeze panes). Formato conforme a documentação
+  // da SheetJS; a build gratuita/community carregada aqui (xlsx.full.min.js)
+  // costuma IGNORAR essa propriedade silenciosamente ao gravar o .xlsx —
+  // congelar painel é normalmente um recurso restrito à versão Pro. Deixamos
+  // a tentativa mesmo assim (sem custo caso seja ignorada pela build atual).
+  ws['!freeze'] = { xSplit: 0, ySplit: 1, topLeftCell: 'A2', activePane: 'bottomLeft', state: 'frozen' };
+
+  // Autofiltro no intervalo completo da tabela — isso É suportado ao gravar
+  // na versão gratuita da SheetJS (não depende de estilo de célula).
+  const lastRow = rows.length - 1;
+  const lastCol = headers.length - 1;
+  ws['!autofilter'] = { ref: window.XLSX.utils.encode_range({ s:{r:0,c:0}, e:{r:lastRow,c:lastCol} }) };
+
+  // Cor de fundo alternada por vaga via estilo de célula (cell.s). Mesma
+  // ressalva do negrito/freeze: a versão gratuita da SheetJS não grava
+  // estilos de célula no .xlsx (recurso Pro), então isso tende a não
+  // aparecer nesta build — por isso a linha em branco entre vagas (acima) é
+  // o mecanismo que garante, de fato, a separação visual aqui.
+  vagaBlocks.forEach((block, idx)=>{
+    if(idx % 2 === 0) return; // pinta uma vaga sim, uma não
+    for(let r=block.startRow; r<=block.endRow; r++){
+      for(let c=0; c<headers.length; c++){
+        const addr = window.XLSX.utils.encode_cell({ r, c });
+        if(!ws[addr]) ws[addr] = { t:'s', v:'' };
+        ws[addr].s = { fill: { fgColor: { rgb:'F2F2F2' } }, border: {
+          top: { style:'thin', color:{ rgb:'CCCCCC' } }, bottom: { style:'thin', color:{ rgb:'CCCCCC' } },
+          left: { style:'thin', color:{ rgb:'CCCCCC' } }, right: { style:'thin', color:{ rgb:'CCCCCC' } }
+        } };
+      }
+    }
+  });
 
   const wb = window.XLSX.utils.book_new();
   window.XLSX.utils.book_append_sheet(wb, ws, 'Escala Extra');
