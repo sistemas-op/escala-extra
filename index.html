@@ -563,7 +563,10 @@ function renderAdmin(){
       }
     }
     html += '<div class="muted-sm" style="margin-bottom:10px;">Escala importada: Equipes '+TEAM_LETTERS.join(', ')+' ('+totalPoliciais+' policial(is) no total) &middot; Calendário: '+dias.length+' dia(s) mapeado(s)'+periodoLabel+'.</div>'
-      + '<button class="btn btn-ghost btn-sm" id="imp-replace-btn">Substituir escala</button>';
+      + '<div style="display:flex;gap:8px;flex-wrap:wrap;">'
+      + '<button class="btn btn-ghost btn-sm" id="imp-replace-btn">Substituir escala</button>'
+      + '<button class="btn btn-ghost btn-sm" id="imp-manual-edit-btn">Editar manualmente</button>'
+      + '</div>';
   } else {
     html += '<div class="muted-sm" style="margin-bottom:10px;">Envie a escala de equipes e o calendário mensal para cruzar com os voluntariados extras e evitar que alguém se voluntarie enquanto já está de serviço normal.</div>'
       + '<div class="field"><label>Escala de equipes (PDF, DOCX, XLSX, ODS ou CSV)</label><input type="file" id="imp-equipes" accept=".pdf,.docx,.xlsx,.ods,.csv"></div>'
@@ -661,6 +664,14 @@ function renderAdmin(){
   if(impReplaceBtn){ impReplaceBtn.onclick = ()=>{ importFormOpen = true; render(); }; }
   const impCancelReplaceBtn = el.querySelector('#imp-cancel-replace');
   if(impCancelReplaceBtn){ impCancelReplaceBtn.onclick = ()=>{ importFormOpen = false; render(); }; }
+  const impManualEditBtn = el.querySelector('#imp-manual-edit-btn');
+  if(impManualEditBtn){
+    impManualEditBtn.onclick = ()=>{
+      const teamsCopy = JSON.parse(JSON.stringify(escalaOficial));
+      const calendarCopy = JSON.parse(JSON.stringify(calendarioOficial));
+      openImportPreviewModal(teamsCopy, calendarCopy, false);
+    };
+  }
 
   const addBtn = el.querySelector('#nf-add');
   if(addBtn){
@@ -1107,23 +1118,67 @@ async function parseCalendarioSpreadsheet(file){
 
 // --- Tela de prévia/conferência ---
 
+function buildImportMemberRowHtml(letter, idx, m){
+  m = m || {};
+  return '<div data-imp-row style="margin-bottom:4px;">'
+    + '<div class="row3" style="align-items:center;">'
+    + '<input data-imp-team="'+letter+'" data-imp-idx="'+idx+'" data-imp-field="patente" value="'+escapeHtml(m.patente||'')+'" placeholder="Patente">'
+    + '<input data-imp-team="'+letter+'" data-imp-idx="'+idx+'" data-imp-field="nome" value="'+escapeHtml(m.nome||'')+'" placeholder="Nome">'
+    + '<div style="display:flex;gap:4px;align-items:center;">'
+    + '<input data-imp-team="'+letter+'" data-imp-idx="'+idx+'" data-imp-field="cpf" value="'+escapeHtml(m.cpf||'')+'" placeholder="000.000.000-00" style="flex:1;min-width:0;'+(m.cpfSuspeito?'border-color:var(--red);':'')+'">'
+    + '<button type="button" class="link-btn" style="color:var(--red);flex-shrink:0;" onclick="removeImportMember(this)" title="Remover policial">✕</button>'
+    + '</div>'
+    + '</div>'
+    + (m.cpfSuspeito ? '<div class="muted-sm" style="color:var(--red);margin:2px 0 6px;">CPF fora do padrão esperado — confira manualmente.</div>' : '')
+    + '</div>';
+}
+
 function buildTeamSectionHtml(letter, members){
-  let html = '<div style="margin-bottom:16px;">'
-    + '<div style="font-family:\'Oswald\',sans-serif;text-transform:uppercase;font-size:13px;color:var(--amber);margin-bottom:8px;">Equipe '+letter+' ('+members.length+')</div>';
+  let rowsHtml = '';
   if(members.length === 0){
-    html += '<div class="muted-sm">Nenhum policial identificado para esta equipe.</div>';
+    rowsHtml = '<div class="muted-sm" data-imp-empty>Nenhum policial identificado para esta equipe.</div>';
   } else {
-    members.forEach((m, idx)=>{
-      html += '<div class="row3" style="margin-bottom:4px;">'
-        + '<input data-imp-team="'+letter+'" data-imp-idx="'+idx+'" data-imp-field="patente" value="'+escapeHtml(m.patente||'')+'" placeholder="Patente">'
-        + '<input data-imp-team="'+letter+'" data-imp-idx="'+idx+'" data-imp-field="nome" value="'+escapeHtml(m.nome||'')+'" placeholder="Nome">'
-        + '<input data-imp-team="'+letter+'" data-imp-idx="'+idx+'" data-imp-field="cpf" value="'+escapeHtml(m.cpf||'')+'" placeholder="000.000.000-00" style="'+(m.cpfSuspeito?'border-color:var(--red);':'')+'">'
-        + '</div>'
-        + (m.cpfSuspeito ? '<div class="muted-sm" style="color:var(--red);margin:-2px 0 6px;">CPF fora do padrão esperado — confira manualmente.</div>' : '');
-    });
+    members.forEach((m, idx)=>{ rowsHtml += buildImportMemberRowHtml(letter, idx, m); });
   }
-  html += '</div>';
-  return html;
+  return '<div style="margin-bottom:16px;" data-imp-team-section="'+letter+'">'
+    + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">'
+    + '<span style="font-family:\'Oswald\',sans-serif;text-transform:uppercase;font-size:13px;color:var(--amber);" data-imp-team-title>Equipe '+letter+' ('+members.length+')</span>'
+    + '<button type="button" class="btn btn-ghost btn-sm" onclick="addImportMember(\''+letter+'\')" title="Adicionar policial">+</button>'
+    + '</div>'
+    + '<div data-imp-rows>'+rowsHtml+'</div>'
+    + '</div>';
+}
+
+let impNextRowIdx = 1000000; // base alto pra nunca colidir com os índices originais (0..n-1) dos membros já existentes
+
+function addImportMember(letter){
+  const section = document.querySelector('[data-imp-team-section="'+letter+'"]');
+  if(!section) return;
+  const rowsContainer = section.querySelector('[data-imp-rows]');
+  const emptyMsg = rowsContainer.querySelector('[data-imp-empty]');
+  if(emptyMsg) emptyMsg.remove();
+  const wrapper = document.createElement('div');
+  wrapper.innerHTML = buildImportMemberRowHtml(letter, impNextRowIdx++, {});
+  rowsContainer.appendChild(wrapper.firstChild);
+  updateImportTeamCount(section, letter);
+}
+
+function removeImportMember(btn){
+  const row = btn.closest('[data-imp-row]');
+  const section = row.closest('[data-imp-team-section]');
+  const letter = section.getAttribute('data-imp-team-section');
+  row.remove();
+  const rowsContainer = section.querySelector('[data-imp-rows]');
+  if(rowsContainer.children.length === 0){
+    rowsContainer.innerHTML = '<div class="muted-sm" data-imp-empty>Nenhum policial identificado para esta equipe.</div>';
+  }
+  updateImportTeamCount(section, letter);
+}
+
+function updateImportTeamCount(section, letter){
+  const title = section.querySelector('[data-imp-team-title]');
+  const count = section.querySelectorAll('[data-imp-row]').length;
+  if(title) title.textContent = 'Equipe '+letter+' ('+count+')';
 }
 
 function buildCalendarSectionHtml(calendar){
@@ -1396,6 +1451,8 @@ window.deleteShift = deleteShift;
 window.removeSignup = removeSignup;
 window.editSignupName = editSignupName;
 window.editSignupPatente = editSignupPatente;
+window.addImportMember = addImportMember;
+window.removeImportMember = removeImportMember;
 
 render();
 
