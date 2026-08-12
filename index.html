@@ -63,6 +63,7 @@
   .field{margin-bottom:12px;}
   .row2{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
   .row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;}
+  .row4{display:grid;grid-template-columns:1fr 0.8fr 1.4fr 1fr;gap:10px;}
   .empty{text-align:center;color:var(--muted);padding:36px 12px;font-size:14px;}
   .empty .big{font-family:'Oswald',sans-serif;font-size:16px;color:var(--text);text-transform:uppercase;margin-bottom:4px;}
   .modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:flex-end;justify-content:center;z-index:50;}
@@ -834,7 +835,14 @@ async function parseEquipesPdf(file){
 // mas a extração de texto do PDF pode quebrar isso em várias "linhas" — por isso
 // concatenamos linhas num buffer até encontrar um CPF completo.
 const CPF_COMPLETE_RE = /CPF[:\s]*([0-9Xx]{3}\.[0-9Xx]{3}\.[0-9Xx]{3}-[0-9Xx]{2})/i;
-const REGISTRO_RE = /-\s*([^.]+?)\.\s*QP\s*PM\s*([^,]+?),\s*CPF[:\s]*([0-9Xx]{3}\.[0-9Xx]{3}\.[0-9Xx]{3}-[0-9Xx]{2})/i;
+// Função e Patente são separadas por um traço cercado de espaços (" - "),
+// o que evita confundir com um traço "colado" dentro do próprio nome da
+// função (ex: "Adjunto-COPOM"). A função é o texto não-guloso antes desse
+// primeiro traço espaçado; a patente é o texto entre o traço e o ponto.
+const REGISTRO_RE = /^(.*?)\s-\s+([^.]+?)\.\s*QP\s*PM\s*([^,]+?),\s*CPF[:\s]*([0-9Xx]{3}\.[0-9Xx]{3}\.[0-9Xx]{3}-[0-9Xx]{2})/i;
+// Usado apenas no fallback abaixo, quando o registro não bate com o formato
+// completo — tenta extrair só a função (melhor esforço).
+const FUNCAO_LOOSE_RE = /^(.*?)\s-\s+/;
 
 function parseEquipesFromLines(lines){
   const teams = { A:[], B:[], C:[], D:[] };
@@ -844,11 +852,13 @@ function parseEquipesFromLines(lines){
     if(!currentTeam || !buffer.trim()){ buffer=''; return; }
     const m = buffer.match(REGISTRO_RE);
     if(m){
-      const cpf = m[3].trim().toUpperCase();
-      teams[currentTeam].push({ nome: m[2].trim(), patente: m[1].trim(), cpf, cpfSuspeito: !isValidCpfShape(cpf) });
+      const cpf = m[4].trim().toUpperCase();
+      teams[currentTeam].push({ funcao: m[1].trim(), patente: m[2].trim(), nome: m[3].trim(), cpf, cpfSuspeito: !isValidCpfShape(cpf) });
     } else {
       const cpfLoose = buffer.match(CPF_COMPLETE_RE);
+      const funcaoLoose = buffer.match(FUNCAO_LOOSE_RE);
       teams[currentTeam].push({
+        funcao: funcaoLoose ? funcaoLoose[1].trim() : '',
         nome: buffer.replace(CPF_COMPLETE_RE,'').replace(/QP\s*PM/i,'').trim().slice(0,80),
         patente: '',
         cpf: cpfLoose ? cpfLoose[1].toUpperCase() : '',
@@ -902,6 +912,7 @@ function tryParseStructuredEquipesRows(rows){
       else if(/^PATENTE/.test(t)) map.patente = c;
       else if(/^NOME/.test(t)) map.nome = c;
       else if(/^CPF/.test(t)) map.cpf = c;
+      else if(/^FUN[CÇ]/.test(t) || /^CARGO/.test(t) || /^POSTO/.test(t)) map.funcao = c;
     });
     if(map.equipe!=null && map.nome!=null && map.cpf!=null){ headerRowIdx = r; colMap = map; break; }
   }
@@ -917,8 +928,9 @@ function tryParseStructuredEquipesRows(rows){
     const nome = colMap.nome!=null ? String(row[colMap.nome]==null?'':row[colMap.nome]).trim() : '';
     const patente = colMap.patente!=null ? String(row[colMap.patente]==null?'':row[colMap.patente]).trim() : '';
     const cpf = colMap.cpf!=null ? String(row[colMap.cpf]==null?'':row[colMap.cpf]).trim().toUpperCase() : '';
+    const funcao = colMap.funcao!=null ? String(row[colMap.funcao]==null?'':row[colMap.funcao]).trim() : '';
     if(!nome && !cpf) continue;
-    teams[letter].push({ nome, patente, cpf, cpfSuspeito: !isValidCpfShape(cpf) });
+    teams[letter].push({ funcao, nome, patente, cpf, cpfSuspeito: !isValidCpfShape(cpf) });
   }
   return teams;
 }
@@ -1121,7 +1133,8 @@ async function parseCalendarioSpreadsheet(file){
 function buildImportMemberRowHtml(letter, idx, m){
   m = m || {};
   return '<div data-imp-row style="margin-bottom:4px;">'
-    + '<div class="row3" style="align-items:center;">'
+    + '<div class="row4" style="align-items:center;">'
+    + '<input data-imp-team="'+letter+'" data-imp-idx="'+idx+'" data-imp-field="funcao" value="'+escapeHtml(m.funcao||'')+'" placeholder="Função">'
     + '<input data-imp-team="'+letter+'" data-imp-idx="'+idx+'" data-imp-field="patente" value="'+escapeHtml(m.patente||'')+'" placeholder="Patente">'
     + '<input data-imp-team="'+letter+'" data-imp-idx="'+idx+'" data-imp-field="nome" value="'+escapeHtml(m.nome||'')+'" placeholder="Nome">'
     + '<div style="display:flex;gap:4px;align-items:center;">'
@@ -1222,7 +1235,7 @@ function openImportPreviewModal(teams, calendar, calendarFallback){
       const letter = input.getAttribute('data-imp-team');
       const idx = parseInt(input.getAttribute('data-imp-idx'), 10);
       const field = input.getAttribute('data-imp-field');
-      if(!finalTeams[letter][idx]) finalTeams[letter][idx] = { nome:'', patente:'', cpf:'' };
+      if(!finalTeams[letter][idx]) finalTeams[letter][idx] = { funcao:'', nome:'', patente:'', cpf:'' };
       finalTeams[letter][idx][field] = input.value.trim();
     });
     TEAM_LETTERS.forEach(letter=>{ finalTeams[letter] = finalTeams[letter].filter(m=> m && (m.nome || m.cpf)); });
