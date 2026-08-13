@@ -278,10 +278,22 @@ async function refreshAll(){
 
 const DOW = ['DOM','SEG','TER','QUA','QUI','SEX','SÁB'];
 const MON = ['JAN','FEV','MAR','ABR','MAI','JUN','JUL','AGO','SET','OUT','NOV','DEZ'];
+// Extrai {ano,mes,dia} numéricos de uma string 'YYYY-MM-DD', ou null se a
+// string estiver ausente/malformada (dado antigo/corrompido). Usado por todo
+// código que precisa comparar ou exibir a data de uma vaga sem arriscar
+// derrubar a tela inteira por causa de um único registro ruim.
+function parseDateStr(dateStr){
+  if(!dateStr || typeof dateStr !== 'string') return null;
+  const parts = dateStr.split('-').map(Number);
+  const [y,m,d] = parts;
+  if(parts.length !== 3 || !Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d) || m < 1 || m > 12 || d < 1 || d > 31) return null;
+  return { y, m, d };
+}
 function fmtDateParts(dateStr){
-  const [y,m,d] = dateStr.split('-').map(Number);
-  const dt = new Date(y, m-1, d);
-  return { dow: DOW[dt.getDay()], dnum: String(d).padStart(2,'0'), mon: MON[m-1] };
+  const p = parseDateStr(dateStr);
+  if(!p) return { dow:'--', dnum:'--', mon:'--' };
+  const dt = new Date(p.y, p.m-1, p.d);
+  return { dow: DOW[dt.getDay()], dnum: String(p.d).padStart(2,'0'), mon: MON[p.m-1] };
 }
 function signupsFor(shiftId){ return signups.filter(s => s.shiftId === shiftId); }
 
@@ -355,13 +367,42 @@ function findEscalaConflict(dateStr, startTime, endTime, cpfDigits){
   return null;
 }
 
+// Verifica se o CPF, ao sair do turno Noite (18:00–06:00) do serviço normal,
+// tem o mínimo de 8h de descanso antes do início da vaga extra no mesmo dia
+// em que esse turno termina (06:00). O turno Noite que termina na manhã de
+// 'dateStr' é o registrado no calendário no dia ANTERIOR (ele começa às
+// 18:00 do dia anterior e vai até 06:00 de 'dateStr'). Sair do turno Dia não
+// tem restrição — essa função só olha o turno Noite. Retorna null se não há
+// conflito de descanso (ou se a escala oficial ainda não foi importada).
+const DESCANSO_MIN_HORAS = 8;
+function findRestConflict(dateStr, startTime, cpfDigits){
+  if(!escalaOficial || !calendarioOficial) return null;
+  const prevDate = shiftDateStr(dateStr, -1);
+  const diaCal = calendarioOficial[prevDate];
+  if(!diaCal) return null;
+  const equipeLetra = diaCal.noite;
+  if(!equipeLetra) return null;
+  const membros = escalaOficial[equipeLetra];
+  if(!membros) return null;
+  const found = membros.find(m=> cpfMatchesMasked(cpfDigits, m.cpf));
+  if(!found) return null;
+  const toMin = t=>{ const [h,m]=t.split(':').map(Number); return h*60+m; };
+  const liberadoAPartirDe = 6*60 + DESCANSO_MIN_HORAS*60; // 06:00 + 8h = 14:00
+  if(toMin(startTime) < liberadoAPartirDe){
+    return { equipe: equipeLetra };
+  }
+  return null;
+}
+
 // ---------- PUBLIC VIEW ----------
 
 function renderVagas(){
   const el = document.getElementById('view-vagas');
   const today = new Date(); today.setHours(0,0,0,0);
-  const upcoming = shifts.filter(s=>{ const [y,m,d]=s.date.split('-').map(Number); return new Date(y,m-1,d) >= today; });
-  const openCount = upcoming.filter(s=> signupsFor(s.id).length < s.vagas).length;
+  // Vagas com data ausente/malformada (dado antigo) são tratadas como não
+  // futuras em vez de derrubar o filtro inteiro — ver parseDateStr.
+  const upcoming = shifts.filter(s=>{ const p=parseDateStr(s && s.date); return p ? new Date(p.y,p.m-1,p.d) >= today : false; });
+  const openCount = upcoming.filter(s=> signupsFor(s.id).length < (s.vagas || 0)).length;
 
   let html = '<div class="refresh-row"><span class="muted-sm">'+openCount+' vaga(s) em aberto</span><button class="link-btn" onclick="refreshAll()">Atualizar</button></div>';
 
@@ -369,24 +410,32 @@ function renderVagas(){
     html += '<div class="card empty"><div class="big">Nenhuma vaga cadastrada</div>Assim que a administração publicar horários, eles aparecem aqui.</div>';
   } else {
     for(const s of upcoming){
-      const su = signupsFor(s.id);
-      const cheias = su.length >= s.vagas;
-      const dp = fmtDateParts(s.date);
-      html += '<div class="card shift-card">'
-        + '<div class="shift-date"><div class="dow">'+dp.dow+'</div><div class="dnum">'+dp.dnum+'</div><div class="mon">'+dp.mon+'</div></div>'
-        + '<div class="shift-body">'
-        + '<div class="shift-time">'+s.startTime+' – '+s.endTime+'</div>'
-        + (metaLine(s) ? '<div class="shift-local">'+metaLine(s)+'</div>' : '')
-        + '<div class="shift-meta">'
-        + '<span class="badge '+(cheias?'full':'open')+'">'+su.length+'/'+s.vagas+' preenchidas</span>'
-        + '<span class="badge phase">'+faseLabel(s.fase)+'</span>'
-        + '</div>'
-        + '<div style="margin-top:10px;">'
-        + '<button class="btn btn-primary" '+(cheias?'disabled':'')+' onclick="openSignupModal(\''+s.id+'\')">'+(cheias?'Esgotado':'Voluntariar-se')+'</button>'
-        + '</div>'
-        + (su.length ? '<div class="names">'+su.map(x=>'<span class="name-chip">'+escapeHtml(x.nome)+' <span class="rank-tag '+x.patente+'">'+RANK_LABEL[x.patente]+'</span></span>').join('')+'</div>' : '')
-        + '<button class="link-btn" style="margin-top:8px;" onclick="openCancelModal(\''+s.id+'\')">Cancelar meu voluntariado</button>'
-        + '</div></div>';
+      // Isola cada card num try/catch: um único registro com dado inesperado
+      // (ex: campo ausente de uma vaga antiga) não pode derrubar a lista
+      // inteira e deixar a aba pública sem nenhuma vaga visível.
+      try{
+        const su = signupsFor(s.id);
+        const vagasTotal = s.vagas || 0;
+        const cheias = su.length >= vagasTotal;
+        const dp = fmtDateParts(s.date);
+        html += '<div class="card shift-card">'
+          + '<div class="shift-date"><div class="dow">'+dp.dow+'</div><div class="dnum">'+dp.dnum+'</div><div class="mon">'+dp.mon+'</div></div>'
+          + '<div class="shift-body">'
+          + '<div class="shift-time">'+(s.startTime||'--:--')+' – '+(s.endTime||'--:--')+'</div>'
+          + (metaLine(s) ? '<div class="shift-local">'+metaLine(s)+'</div>' : '')
+          + '<div class="shift-meta">'
+          + '<span class="badge '+(cheias?'full':'open')+'">'+su.length+'/'+vagasTotal+' preenchidas</span>'
+          + '<span class="badge phase">'+faseLabel(s.fase)+'</span>'
+          + '</div>'
+          + '<div style="margin-top:10px;">'
+          + '<button class="btn btn-primary" '+(cheias?'disabled':'')+' onclick="openSignupModal(\''+s.id+'\')">'+(cheias?'Esgotado':'Voluntariar-se')+'</button>'
+          + '</div>'
+          + (su.length ? '<div class="names">'+su.map(x=>'<span class="name-chip">'+escapeHtml(x.nome)+' <span class="rank-tag '+(x.patente||'')+'">'+(RANK_LABEL[x.patente]||x.patente||'N/D')+'</span></span>').join('')+'</div>' : '')
+          + '<button class="link-btn" style="margin-top:8px;" onclick="openCancelModal(\''+s.id+'\')">Cancelar meu voluntariado</button>'
+          + '</div></div>';
+      }catch(err){
+        console.error('Erro ao renderizar vaga', s && s.id, err);
+      }
     }
   }
   el.innerHTML = html;
@@ -432,6 +481,11 @@ function openSignupModal(shiftId){
     const conflict = findEscalaConflict(freshShift.date, freshShift.startTime, freshShift.endTime, cpfDigits);
     if(conflict){
       showToast('Você já está escalado no serviço normal neste dia (Equipe '+conflict.equipe+', turno '+conflict.turnoLabel+'). Não é possível se voluntariar.');
+      return;
+    }
+    const restConflict = findRestConflict(freshShift.date, freshShift.startTime, cpfDigits);
+    if(restConflict){
+      showToast('Descanso insuficiente: você saiu do serviço noturno às 06:00 e precisa de 8 horas de descanso. Só é possível se voluntariar a partir das 14:00.');
       return;
     }
     const [vagaAno, vagaMes] = freshShift.date.split('-');
@@ -608,7 +662,7 @@ function renderAdmin(){
           + '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;flex-wrap:wrap;">'
           + '<div><div class="shift-time">'+dp.dnum+'/'+dp.mon+' &middot; '+s.startTime+'–'+s.endTime+'</div>'
           + (metaLine(s) ? '<div class="shift-local">'+metaLine(s)+'</div>' : '')
-          + '<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;"><span class="badge '+(su.length>=s.vagas?'full':'open')+'">'+su.length+'/'+s.vagas+'</span><span class="badge phase">'+faseLabel(s.fase)+'</span></div>'
+          + '<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;"><span class="badge '+(su.length>=(s.vagas||0)?'full':'open')+'">'+su.length+'/'+(s.vagas||0)+'</span><span class="badge phase">'+faseLabel(s.fase)+'</span></div>'
           + '</div>'
           + '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">'
           + faseQuickButtonsHtml(s)
@@ -1286,7 +1340,7 @@ function exportEscalaXlsx(){
 
   const today = new Date(); today.setHours(0,0,0,0);
   const upcoming = shifts
-    .filter(s=>{ const [y,m,d]=s.date.split('-').map(Number); return new Date(y,m-1,d) >= today; })
+    .filter(s=>{ const p=parseDateStr(s && s.date); return p ? new Date(p.y,p.m-1,p.d) >= today : false; })
     .slice()
     .sort((a,b)=> (a.date+a.startTime).localeCompare(b.date+b.startTime));
 
