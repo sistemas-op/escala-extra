@@ -57,10 +57,11 @@
   .btn-danger{background:var(--red-dim);color:var(--red);border:1px solid #4a2222;}
   .btn-blue{background:var(--blue-dim);color:var(--blue);border:1px solid #234258;}
   .btn-block{width:100%;margin-top:12px;}
-  .btn-sm{padding:6px 10px;font-size:11px;}
+  .btn-sm{padding:6px 10px;font-size:11px;min-height:40px;display:inline-flex;align-items:center;}
   input,select{width:100%;background:var(--panel-2);border:1px solid var(--border);color:var(--text);padding:10px 12px;border-radius:8px;font-family:'Inter',sans-serif;font-size:14px;margin-top:6px;}
   label{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;font-family:'Oswald',sans-serif;}
   .field{margin-bottom:12px;}
+  .input-error{border-color:var(--red);}
   .row2{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
   .row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;}
   .row4{display:grid;grid-template-columns:1fr 0.8fr 1.4fr 1fr;gap:10px;}
@@ -78,7 +79,7 @@
   .toast.show{opacity:1;}
   .refresh-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;}
   .muted-sm{font-size:11px;color:var(--muted);font-family:'JetBrains Mono',monospace;}
-  .link-btn{background:none;border:none;color:var(--muted);text-decoration:underline;font-size:12px;cursor:pointer;padding:0;}
+  .link-btn{background:none;border:none;color:var(--muted);text-decoration:underline;font-size:12px;cursor:pointer;padding:6px 10px;min-height:44px;min-width:44px;display:inline-flex;align-items:center;justify-content:center;}
   table.roster{width:100%;border-collapse:collapse;font-size:13px;}
   table.roster th{text-align:left;font-family:'Oswald',sans-serif;text-transform:uppercase;font-size:11px;letter-spacing:.04em;color:var(--muted);padding:8px 6px;border-bottom:1px solid var(--border);}
   table.roster td{padding:8px 6px;border-bottom:1px solid var(--border);vertical-align:middle;}
@@ -174,8 +175,29 @@ const FASE_OPTIONS = [
 const FASE_LABEL = { sgt:'Somente Sargentos', cabo:'Somente Cabos', soldado:'Somente Soldados', todos:'Todos os postos/graduações' };
 
 function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,8); }
-function escapeHtml(str){ const d=document.createElement('div'); d.textContent=str||''; return d.innerHTML; }
+// A serialização de texto do navegador (textContent -> innerHTML) já escapa
+// & < > sozinha, mas NÃO escapa aspas simples/duplas (elas não precisam de
+// escape dentro de um nó de texto). Isso torna o resultado inseguro sempre
+// que for inserido dentro de um atributo HTML delimitado por aspas (ex:
+// value="..."), porque uma aspa literal no dado quebra pra fora do atributo
+// e vira HTML/atributo novo. Por isso escapamos aspas manualmente aqui —
+// função é usada tanto em texto quanto em atributos por todo o app.
+function escapeHtml(str){ const d=document.createElement('div'); d.textContent=str||''; return d.innerHTML.replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 function showToast(msg){ const t=document.getElementById('toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),2400); }
+// Usado para decidir se um campo deve receber foco automático ao abrir um
+// modal: em telas pequenas isso abriria o teclado virtual imediatamente,
+// cobrindo o próprio modal, então só focamos automaticamente em telas
+// maiores (desktop/tablet).
+function isDesktopViewport(){ return window.matchMedia('(min-width:768px)').matches; }
+// Marca um campo com borda vermelha (classe .input-error) além do toast já
+// exibido; a marca some sozinha assim que o usuário mexer no campo de novo.
+function flagInvalid(el){
+  if(!el) return;
+  el.classList.add('input-error');
+  const clear = ()=> el.classList.remove('input-error');
+  el.addEventListener('input', clear, { once:true });
+  el.addEventListener('change', clear, { once:true });
+}
 function allowedRanks(fase){
   if(fase === 'todos') return ['sgt','cabo','soldado'];
   if(fase === 'sgt' || fase === 'cabo' || fase === 'soldado') return [fase];
@@ -185,7 +207,7 @@ function faseLabel(fase){ return FASE_LABEL[fase] || FASE_LABEL.sgt; }
 function faseSelectOptions(selected){
   return FASE_OPTIONS.map(o=>'<option value="'+o.v+'" '+(o.v===selected?'selected':'')+'>'+o.label+'</option>').join('');
 }
-function metaLine(s){ const parts=[]; if(s.local) parts.push(s.local); if(s.viatura) parts.push('Viatura '+s.viatura); return parts.join(' &middot; '); }
+function metaLine(s){ const parts=[]; if(s.local) parts.push(escapeHtml(s.local)); if(s.viatura) parts.push('Viatura '+escapeHtml(s.viatura)); return parts.join(' &middot; '); }
 function sortShifts(){ shifts.sort((a,b)=> (a.date+a.startTime).localeCompare(b.date+b.startTime)); }
 
 // ---------- AUTOCOMPLETAR (datalists a partir dos dados já em memória) ----------
@@ -430,7 +452,7 @@ function renderVagas(){
           + '<div style="margin-top:10px;">'
           + '<button class="btn btn-primary" '+(cheias?'disabled':'')+' onclick="openSignupModal(\''+s.id+'\')">'+(cheias?'Esgotado':'Voluntariar-se')+'</button>'
           + '</div>'
-          + (su.length ? '<div class="names">'+su.map(x=>'<span class="name-chip">'+escapeHtml(x.nome)+' <span class="rank-tag '+(x.patente||'')+'">'+(RANK_LABEL[x.patente]||x.patente||'N/D')+'</span></span>').join('')+'</div>' : '')
+          + (su.length ? '<div class="names">'+su.map(x=>'<span class="name-chip">'+escapeHtml(x.nome)+' <span class="rank-tag '+escapeHtml(x.patente||'')+'">'+escapeHtml(RANK_LABEL[x.patente]||x.patente||'N/D')+'</span></span>').join('')+'</div>' : '')
           + '<button class="link-btn" style="margin-top:8px;" onclick="openCancelModal(\''+s.id+'\')">Cancelar meu voluntariado</button>'
           + '</div></div>';
       }catch(err){
@@ -456,35 +478,43 @@ function openSignupModal(shiftId){
     + '<h3>Confirmar voluntariado</h3>'
     + '<div class="shift-local" style="margin-bottom:6px;">'+dp.dnum+'/'+dp.mon+' &middot; '+s.startTime+'–'+s.endTime+(metaLine(s)?(' &middot; '+metaLine(s)):'')+'</div>'
     + '<div class="badge phase" style="margin-bottom:14px;">'+faseLabel(s.fase)+'</div>'
-    + '<div class="field"><label>Nome completo</label><input id="su-nome" list="datalist-nomes" placeholder="Ex: Sd Eduardo Silva" autofocus></div>'
+    + '<form id="su-form">'
+    + '<div class="field"><label>Nome completo</label><input id="su-nome" list="datalist-nomes" placeholder="Ex: Sd Eduardo Silva"></div>'
     + '<div class="field"><label>Patente</label><select id="su-patente">'+rankOptions(allowed)+'</select></div>'
     + '<div class="field"><label>CPF</label><input id="su-cpf" placeholder="000.000.000-00" maxlength="14" inputmode="numeric"></div>'
-    + '<div class="modal-actions"><button class="btn btn-ghost" id="su-cancel">Cancelar</button><button class="btn btn-primary" id="su-confirm">Confirmar</button></div>'
+    + '<div class="modal-actions"><button type="button" class="btn btn-ghost" id="su-cancel">Cancelar</button><button type="submit" class="btn btn-primary" id="su-confirm">Confirmar</button></div>'
+    + '</form>'
     + '</div>';
   document.body.appendChild(bg);
+  const nomeInput = bg.querySelector('#su-nome');
+  if(isDesktopViewport()) nomeInput.focus();
   const cpfInput = bg.querySelector('#su-cpf');
   cpfInput.oninput = ()=>{ cpfInput.value = maskCpf(cpfInput.value); };
   bg.querySelector('#su-cancel').onclick = ()=> bg.remove();
-  bg.querySelector('#su-confirm').onclick = ()=>{
-    const nome = bg.querySelector('#su-nome').value.trim();
-    const patente = bg.querySelector('#su-patente').value;
+  bg.querySelector('#su-form').onsubmit = (e)=>{
+    e.preventDefault();
+    const nome = nomeInput.value.trim();
+    const patenteEl = bg.querySelector('#su-patente');
+    const patente = patenteEl.value;
     const cpfMasked = cpfInput.value.trim();
     const cpfDigits = cpfMasked.replace(/\D/g,'');
-    if(!nome){ showToast('Digite seu nome'); return; }
-    if(cpfDigits.length !== 11){ showToast('Digite um CPF válido'); return; }
+    if(!nome){ flagInvalid(nomeInput); showToast('Digite seu nome'); return; }
+    if(cpfDigits.length !== 11){ flagInvalid(cpfInput); showToast('Digite um CPF válido'); return; }
     const freshShift = shifts.find(x=>x.id===shiftId);
     if(!freshShift){ showToast('Vaga não encontrada'); bg.remove(); return; }
     const su = signupsFor(shiftId);
-    if(!allowedRanks(freshShift.fase).includes(patente)){ showToast('Essa vaga ainda não está liberada para '+RANK_LABEL[patente]); return; }
+    if(!allowedRanks(freshShift.fase).includes(patente)){ flagInvalid(patenteEl); showToast('Essa vaga ainda não está liberada para '+RANK_LABEL[patente]); return; }
     if(su.length >= freshShift.vagas){ showToast('Vaga esgotada, atualize a página'); bg.remove(); render(); return; }
-    if(su.some(x=>x.nome.toLowerCase()===nome.toLowerCase())){ showToast('Você já está nesta vaga'); return; }
+    if(su.some(x=>x.nome.toLowerCase()===nome.toLowerCase())){ flagInvalid(nomeInput); showToast('Você já está nesta vaga'); return; }
     const conflict = findEscalaConflict(freshShift.date, freshShift.startTime, freshShift.endTime, cpfDigits);
     if(conflict){
+      flagInvalid(cpfInput);
       showToast('Você já está escalado no serviço normal neste dia (Equipe '+conflict.equipe+', turno '+conflict.turnoLabel+'). Não é possível se voluntariar.');
       return;
     }
     const restConflict = findRestConflict(freshShift.date, freshShift.startTime, cpfDigits);
     if(restConflict){
+      flagInvalid(cpfInput);
       showToast('Descanso insuficiente: você saiu do serviço noturno às 06:00 e precisa de 8 horas de descanso. Só é possível se voluntariar a partir das 14:00.');
       return;
     }
@@ -497,6 +527,7 @@ function openSignupModal(shiftId){
       return xAno===vagaAno && xMes===vagaMes;
     }).length;
     if(extrasNoMes >= 10){
+      flagInvalid(cpfInput);
       showToast('Limite de 10 extras no mês atingido para este CPF.');
       return;
     }
@@ -518,23 +549,28 @@ function openCancelModal(shiftId){
   bg.innerHTML = '<div class="modal">'
     + '<h3>Cancelar voluntariado</h3>'
     + '<div class="shift-local" style="margin-bottom:14px;">'+dp.dnum+'/'+dp.mon+' &middot; '+s.startTime+'–'+s.endTime+(metaLine(s)?(' &middot; '+metaLine(s)):'')+'</div>'
-    + '<div class="field"><label>Digite o nome que você usou pra se voluntariar</label><input id="cn-nome" list="datalist-nomes" placeholder="Ex: Sd Eduardo Silva" autofocus></div>'
+    + '<form id="cn-form">'
+    + '<div class="field"><label>Digite o nome que você usou pra se voluntariar</label><input id="cn-nome" list="datalist-nomes" placeholder="Ex: Sd Eduardo Silva"></div>'
     + '<div class="field"><label>CPF</label><input id="cn-cpf" placeholder="000.000.000-00" maxlength="14" inputmode="numeric"></div>'
-    + '<div class="modal-actions"><button class="btn btn-ghost" id="cn-cancel">Voltar</button><button class="btn btn-danger" id="cn-confirm">Cancelar minha vaga</button></div>'
+    + '<div class="modal-actions"><button type="button" class="btn btn-ghost" id="cn-cancel">Voltar</button><button type="submit" class="btn btn-danger" id="cn-confirm">Cancelar minha vaga</button></div>'
+    + '</form>'
     + '</div>';
   document.body.appendChild(bg);
+  const cnNomeInput = bg.querySelector('#cn-nome');
+  if(isDesktopViewport()) cnNomeInput.focus();
   const cnCpfInput = bg.querySelector('#cn-cpf');
   cnCpfInput.oninput = ()=>{ cnCpfInput.value = maskCpf(cnCpfInput.value); };
   bg.querySelector('#cn-cancel').onclick = ()=> bg.remove();
-  bg.querySelector('#cn-confirm').onclick = ()=>{
-    const nome = bg.querySelector('#cn-nome').value.trim();
+  bg.querySelector('#cn-form').onsubmit = (e)=>{
+    e.preventDefault();
+    const nome = cnNomeInput.value.trim();
     const cpfDigits = cnCpfInput.value.replace(/\D/g,'');
-    if(!nome){ showToast('Digite seu nome'); return; }
-    if(cpfDigits.length !== 11){ showToast('Digite um CPF válido'); return; }
+    if(!nome){ flagInvalid(cnNomeInput); showToast('Digite seu nome'); return; }
+    if(cpfDigits.length !== 11){ flagInvalid(cnCpfInput); showToast('Digite um CPF válido'); return; }
     const match = signupsFor(shiftId).find(x=>x.nome.toLowerCase()===nome.toLowerCase());
-    if(!match){ showToast('Nome não encontrado nesta vaga'); return; }
+    if(!match){ flagInvalid(cnNomeInput); showToast('Nome não encontrado nesta vaga'); return; }
     const matchCpfDigits = (match.cpf||'').replace(/\D/g,'');
-    if(matchCpfDigits !== cpfDigits){ showToast('CPF não confere com o cadastro desta vaga'); return; }
+    if(matchCpfDigits !== cpfDigits){ flagInvalid(cnCpfInput); showToast('CPF não confere com o cadastro desta vaga'); return; }
     const removedId = match.id;
     signups = signups.filter(x=>x.id!==removedId);
     bg.remove();
@@ -577,17 +613,21 @@ function renderAdmin(){
       + '<div class="lock">🔒</div>'
       + '<div style="font-family:\'Oswald\',sans-serif;text-transform:uppercase;">'+(currentPin ? 'Área restrita' : 'Definir PIN de administração')+'</div>'
       + '<div class="muted-sm" style="margin-top:6px;">'+(currentPin ? 'Digite o PIN para gerenciar as vagas' : 'Crie um PIN para proteger esta área')+'</div>'
+      + '<form id="pin-form">'
       + '<input id="pin-input" type="tel" maxlength="8" placeholder="••••">'
-      + '<button class="btn btn-primary btn-block" id="pin-submit" style="max-width:200px;">'+(currentPin ? 'Entrar' : 'Definir e entrar')+'</button>'
+      + '<button type="submit" class="btn btn-primary btn-block" id="pin-submit" style="max-width:200px;">'+(currentPin ? 'Entrar' : 'Definir e entrar')+'</button>'
+      + '</form>'
       + '</div>';
-    el.querySelector('#pin-submit').onclick = ()=>{
-      const val = el.querySelector('#pin-input').value.trim();
-      if(!val){ showToast('Digite um PIN'); return; }
+    el.querySelector('#pin-form').onsubmit = (e)=>{
+      e.preventDefault();
+      const pinInput = el.querySelector('#pin-input');
+      const val = pinInput.value.trim();
+      if(!val){ flagInvalid(pinInput); showToast('Digite um PIN'); return; }
       if(!currentPin){
         currentPin = val; adminUnlocked = true; showToast('PIN definido'); render();
         persist({ pin: val });
       } else if(val === currentPin){ adminUnlocked = true; render(); }
-      else { showToast('PIN incorreto'); }
+      else { flagInvalid(pinInput); showToast('PIN incorreto'); }
     };
     return;
   }
@@ -633,11 +673,13 @@ function renderAdmin(){
 
   html += '<div class="card">'
     + '<div style="font-family:\'Oswald\',sans-serif;text-transform:uppercase;font-size:14px;margin-bottom:10px;">Nova vaga</div>'
+    + '<form id="nf-form">'
     + '<div class="row2"><div class="field"><label>Data</label><input type="date" id="nf-date"></div><div class="field"><label>Vagas</label><input type="number" id="nf-vagas" min="1" value="1"></div></div>'
     + '<div class="row2"><div class="field"><label>Início</label><input type="time" id="nf-start"></div><div class="field"><label>Término</label><input type="time" id="nf-end"></div></div>'
     + '<div class="row2"><div class="field"><label>Local (opcional)</label><input id="nf-local" list="datalist-locais" placeholder="Ex: Batalhão / Evento"></div><div class="field"><label>Viatura (opcional)</label><input id="nf-viatura" list="datalist-viaturas" placeholder="Ex: 1234"></div></div>'
     + '<div class="field"><label>Liberar inicialmente para</label><select id="nf-fase">'+faseSelectOptions('sgt')+'</select></div>'
-    + '<button class="btn btn-primary btn-block" id="nf-add">Adicionar vaga</button>'
+    + '<button type="submit" class="btn btn-primary btn-block" id="nf-add">Adicionar vaga</button>'
+    + '</form>'
     + '</div>';
 
   html += '<div class="refresh-row"><span class="muted-sm">'+shifts.length+' vaga(s) cadastradas</span><button class="link-btn" onclick="refreshAll()">Atualizar</button></div>';
@@ -651,11 +693,13 @@ function renderAdmin(){
       if(editingShiftId === s.id){
         html += '<div class="card">'
           + '<div style="font-family:\'Oswald\',sans-serif;text-transform:uppercase;font-size:13px;margin-bottom:8px;color:var(--amber);">Editando vaga</div>'
+          + '<form id="ef-form">'
           + '<div class="row2"><div class="field"><label>Data</label><input type="date" id="ef-date" value="'+s.date+'"></div><div class="field"><label>Vagas</label><input type="number" id="ef-vagas" min="1" value="'+s.vagas+'"></div></div>'
           + '<div class="row2"><div class="field"><label>Início</label><input type="time" id="ef-start" value="'+s.startTime+'"></div><div class="field"><label>Término</label><input type="time" id="ef-end" value="'+s.endTime+'"></div></div>'
           + '<div class="row2"><div class="field"><label>Local</label><input id="ef-local" list="datalist-locais" value="'+escapeHtml(s.local||'')+'"></div><div class="field"><label>Viatura</label><input id="ef-viatura" list="datalist-viaturas" value="'+escapeHtml(s.viatura||'')+'"></div></div>'
           + '<div class="field"><label>Liberado para</label><select id="ef-fase">'+faseSelectOptions(s.fase)+'</select></div>'
-          + '<div class="modal-actions"><button class="btn btn-ghost" id="ef-cancel">Cancelar</button><button class="btn btn-primary" id="ef-save">Salvar</button></div>'
+          + '<div class="modal-actions"><button type="button" class="btn btn-ghost" id="ef-cancel">Cancelar</button><button type="submit" class="btn btn-primary" id="ef-save">Salvar</button></div>'
+          + '</form>'
           + '</div>';
       } else {
         html += '<div class="card">'
@@ -728,17 +772,27 @@ function renderAdmin(){
     };
   }
 
-  const addBtn = el.querySelector('#nf-add');
-  if(addBtn){
-    addBtn.onclick = ()=>{
-      const date = el.querySelector('#nf-date').value;
-      const start = el.querySelector('#nf-start').value;
-      const end = el.querySelector('#nf-end').value;
-      const vagas = parseInt(el.querySelector('#nf-vagas').value) || 1;
+  const nfForm = el.querySelector('#nf-form');
+  if(nfForm){
+    nfForm.onsubmit = (e)=>{
+      e.preventDefault();
+      const dateEl = el.querySelector('#nf-date');
+      const startEl = el.querySelector('#nf-start');
+      const endEl = el.querySelector('#nf-end');
+      const date = dateEl.value;
+      const start = startEl.value;
+      const end = endEl.value;
+      const vagas = Math.max(1, parseInt(el.querySelector('#nf-vagas').value) || 1);
       const local = el.querySelector('#nf-local').value.trim();
       const viatura = el.querySelector('#nf-viatura').value.trim();
       const fase = el.querySelector('#nf-fase').value;
-      if(!date || !start || !end){ showToast('Preencha data e horários'); return; }
+      if(!date || !start || !end){
+        if(!date) flagInvalid(dateEl);
+        if(!start) flagInvalid(startEl);
+        if(!end) flagInvalid(endEl);
+        showToast('Preencha data e horários');
+        return;
+      }
       const newShift = { id: uid(), date, startTime: start, endTime: end, vagas, local, viatura, fase };
       shifts.push(newShift);
       sortShifts();
@@ -749,15 +803,16 @@ function renderAdmin(){
   }
   const efCancel = el.querySelector('#ef-cancel');
   if(efCancel){ efCancel.onclick = ()=>{ editingShiftId = null; render(); }; }
-  const efSave = el.querySelector('#ef-save');
-  if(efSave){
-    efSave.onclick = ()=>{
+  const efForm = el.querySelector('#ef-form');
+  if(efForm){
+    efForm.onsubmit = (e)=>{
+      e.preventDefault();
       const s = shifts.find(x=>x.id===editingShiftId);
       if(!s) return;
       s.date = el.querySelector('#ef-date').value;
       s.startTime = el.querySelector('#ef-start').value;
       s.endTime = el.querySelector('#ef-end').value;
-      s.vagas = parseInt(el.querySelector('#ef-vagas').value) || 1;
+      s.vagas = Math.max(1, parseInt(el.querySelector('#ef-vagas').value) || 1);
       s.local = el.querySelector('#ef-local').value.trim();
       s.viatura = el.querySelector('#ef-viatura').value.trim();
       s.fase = el.querySelector('#ef-fase').value;
@@ -779,20 +834,27 @@ function openChangePinModal(){
   bg.className = 'modal-bg';
   bg.innerHTML = '<div class="modal">'
     + '<h3>Trocar PIN</h3>'
-    + '<div class="field"><label>PIN atual</label><input id="cp-atual" type="tel" maxlength="8" placeholder="••••" autofocus></div>'
+    + '<form id="cp-form">'
+    + '<div class="field"><label>PIN atual</label><input id="cp-atual" type="tel" maxlength="8" placeholder="••••"></div>'
     + '<div class="field"><label>Novo PIN</label><input id="cp-novo" type="tel" maxlength="8" placeholder="••••"></div>'
     + '<div class="field"><label>Confirmar novo PIN</label><input id="cp-confirma" type="tel" maxlength="8" placeholder="••••"></div>'
-    + '<div class="modal-actions"><button class="btn btn-ghost" id="cp-cancel">Cancelar</button><button class="btn btn-primary" id="cp-confirm">Salvar</button></div>'
+    + '<div class="modal-actions"><button type="button" class="btn btn-ghost" id="cp-cancel">Cancelar</button><button type="submit" class="btn btn-primary" id="cp-confirm">Salvar</button></div>'
+    + '</form>'
     + '</div>';
   document.body.appendChild(bg);
+  const cpAtualInput = bg.querySelector('#cp-atual');
+  if(isDesktopViewport()) cpAtualInput.focus();
   bg.querySelector('#cp-cancel').onclick = ()=> bg.remove();
-  bg.querySelector('#cp-confirm').onclick = ()=>{
-    const atual = bg.querySelector('#cp-atual').value.trim();
-    const novo = bg.querySelector('#cp-novo').value.trim();
-    const confirma = bg.querySelector('#cp-confirma').value.trim();
-    if(atual !== currentPin){ showToast('PIN atual incorreto'); return; }
-    if(!novo){ showToast('Digite o novo PIN'); return; }
-    if(novo !== confirma){ showToast('Os PINs não coincidem'); return; }
+  bg.querySelector('#cp-form').onsubmit = (e)=>{
+    e.preventDefault();
+    const cpNovoInput = bg.querySelector('#cp-novo');
+    const cpConfirmaInput = bg.querySelector('#cp-confirma');
+    const atual = cpAtualInput.value.trim();
+    const novo = cpNovoInput.value.trim();
+    const confirma = cpConfirmaInput.value.trim();
+    if(atual !== currentPin){ flagInvalid(cpAtualInput); showToast('PIN atual incorreto'); return; }
+    if(!novo){ flagInvalid(cpNovoInput); showToast('Digite o novo PIN'); return; }
+    if(novo !== confirma){ flagInvalid(cpNovoInput); flagInvalid(cpConfirmaInput); showToast('Os PINs não coincidem'); return; }
     currentPin = novo;
     bg.remove();
     showToast('PIN atualizado');
@@ -828,10 +890,18 @@ async function processImportFiles(){
   const btn = document.getElementById('imp-process');
   if(btn){ btn.disabled = true; btn.textContent = 'Processando...'; }
   try{
-    const [teams, calendarResult] = await Promise.all([
+    // Bibliotecas de terceiros (ex: mammoth em certos .docx) podem, em casos
+    // raros, travar numa Promise que nunca resolve nem rejeita — sem essa
+    // corrida contra um timeout, o botão ficaria "Processando..." para
+    // sempre, sem nenhum feedback de erro pro admin.
+    const withTimeout = (p, ms)=> Promise.race([
+      p,
+      new Promise((_, reject)=> setTimeout(()=> reject(new Error('Tempo esgotado ao ler o arquivo (30s). O arquivo pode estar corrompido ou em formato incomum — tente novamente ou use outro formato (PDF/XLSX/ODS/CSV).')), ms))
+    ]);
+    const [teams, calendarResult] = await withTimeout(Promise.all([
       parseEquipesFile(equipesFile),
       parseCalendarioFile(calFile)
-    ]);
+    ]), 30000);
     openImportPreviewModal(teams, calendarResult.calendar, calendarResult.usedFallback);
   }catch(e){
     console.error(e);
