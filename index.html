@@ -95,6 +95,7 @@
   .rank-tag.cabo{color:var(--blue);}
   .rank-tag.soldado{color:var(--green);}
   .app-footer{margin-top:32px;padding-top:16px;border-top:1px solid var(--green-inst-dim);text-align:center;font-family:'Inter',sans-serif;font-size:11.5px;color:var(--muted);}
+  .lock-screen{position:fixed;inset:0;background:var(--bg);color:var(--muted);display:none;align-items:center;justify-content:center;text-align:center;padding:24px;font-family:'Inter',sans-serif;font-size:15px;z-index:200;}
 </style>
 </head>
 <body>
@@ -122,6 +123,7 @@
   <div id="view-admin" style="display:none;"></div>
   <footer class="app-footer">Desenvolvido por Eduardo Valgoi</footer>
 </div>
+<div id="lock-screen" class="lock-screen">Sistema temporariamente indisponível.</div>
 <div id="toast" class="toast"></div>
 <datalist id="datalist-nomes"></datalist>
 <datalist id="datalist-locais"></datalist>
@@ -156,6 +158,7 @@ if(window.pdfjsLib){
 
 let shifts = [];
 let signups = [];
+let bloqueioTotal = false; // só é alterado via campo 'bloqueioTotal' no Firestore (console do Firebase) — nunca por UI
 let adminUnlocked = false;
 let currentPin = null;
 let editingShiftId = null;
@@ -254,6 +257,10 @@ function refreshDatalists(){
 // tempo nunca sobrescrevem uma a outra — só o item alterado é tocado.
 
 function applyRemoteData(data){
+  // Checado antes de qualquer outro campo: se o bloqueio total estiver
+  // ativo, render() vai curto-circuitar e nada mais do estado remoto
+  // (pin, vagas, etc.) chega a ser exibido nesta passada.
+  bloqueioTotal = !!data.bloqueioTotal;
   currentPin = data.pin ?? null;
   shifts = Object.values(data.shifts || {}).map(s=>({...s}));
   shifts.forEach(s=>{ if(!s.fase) s.fase='sgt'; });
@@ -1576,7 +1583,29 @@ function clearAllData(){
   persistWipeAll();
 }
 
-function render(){ renderVagas(); renderAdmin(); refreshDatalists(); }
+// Mostra/esconde a tela de bloqueio total, sobrepondo qualquer outro
+// conteúdo da página (tela pública, administração, abas). Não existe
+// nenhum controle dentro do app que altere 'bloqueioTotal' — o campo só
+// é editado manualmente no console do Firestore.
+function updateLockScreen(){
+  const lockEl = document.getElementById('lock-screen');
+  const wrapEl = document.querySelector('.wrap');
+  const toastEl = document.getElementById('toast');
+  if(bloqueioTotal){
+    lockEl.style.display = 'flex';
+    wrapEl.style.display = 'none';
+    if(toastEl) toastEl.classList.remove('show');
+  } else {
+    lockEl.style.display = 'none';
+    wrapEl.style.display = '';
+  }
+}
+
+function render(){
+  updateLockScreen();
+  if(bloqueioTotal) return; // bloqueio prevalece sobre qualquer estado local (aba ativa, PIN validado, etc.)
+  renderVagas(); renderAdmin(); refreshDatalists();
+}
 
 document.getElementById('tab-vagas').onclick = ()=>{
   activeTab = 'vagas';
@@ -1615,7 +1644,7 @@ function attachRealtimeListener(){
   unsubscribeRealtime = onSnapshot(docRef, (snap)=>{
     try{
       if(!snap.exists()){
-        setDoc(docRef, { pin: null, shifts: {}, signups: {} }, { merge: true }).catch(e=>console.error(e));
+        setDoc(docRef, { pin: null, shifts: {}, signups: {}, bloqueioTotal: false }, { merge: true }).catch(e=>console.error(e));
         return; // o próprio setDoc acima vai disparar este listener de novo
       }
       applyRemoteData(snap.data());
