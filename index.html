@@ -1443,23 +1443,48 @@ function updateImportTeamCount(section, letter){
   if(title) title.textContent = 'Equipe '+letter+' ('+count+')';
 }
 
+// Cada linha traz um botão "✕" pra remover a data (mesmo padrão de
+// removeImportMember pros policiais). Isso é essencial: a tela "Editar
+// Manualmente" sempre parte de uma CÓPIA do calendarioOficial já salvo, e o
+// botão "Confirmar e salvar" resubmete TODAS as linhas presentes na tabela.
+// Sem uma forma de excluir uma linha aqui, uma data indevida que tenha
+// entrado no calendário uma vez (import antigo, teste, edição) nunca sai —
+// ela é resalva como "válida" a cada novo salvamento, mesmo depois da
+// importação passar a substituir o campo inteiro (updateDoc) em vez de fazer
+// merge raso.
 function buildCalendarSectionHtml(calendar){
   const dates = Object.keys(calendar).sort();
-  let html = '<div class="section-title accent" style="font-size:13px;margin:16px 0 8px;">Calendário ('+dates.length+' dia(s))</div>';
+  let html = '<div class="section-title accent" style="font-size:13px;margin:16px 0 8px;" data-imp-cal-title>Calendário ('+dates.length+' dia(s))</div>';
   if(dates.length === 0){
-    html += '<div class="muted-sm">Nenhum dia identificado no calendário.</div>';
+    html += '<div class="muted-sm" data-imp-cal-empty>Nenhum dia identificado no calendário.</div>';
   } else {
-    html += '<div class="table-wrap"><table class="roster"><thead><tr><th>Data</th><th>Dia</th><th>Noite</th></tr></thead><tbody>';
-    dates.forEach(dateStr=>{
-      const entry = calendar[dateStr];
-      const dp = fmtDateParts(dateStr);
-      html += '<tr><td>'+dp.dnum+'/'+dp.mon+'</td>'
-        + '<td><input data-imp-cal-date="'+dateStr+'" data-imp-cal-field="dia" value="'+escapeHtml(entry.dia||'')+'" style="max-width:56px;"></td>'
-        + '<td><input data-imp-cal-date="'+dateStr+'" data-imp-cal-field="noite" value="'+escapeHtml(entry.noite||'')+'" style="max-width:56px;"></td></tr>';
-    });
+    html += '<div class="table-wrap"><table class="roster" data-imp-cal-table><thead><tr><th>Data</th><th>Dia</th><th>Noite</th><th></th></tr></thead><tbody>';
+    dates.forEach(dateStr=>{ html += buildImportCalendarRowHtml(dateStr, calendar[dateStr]); });
     html += '</tbody></table></div>';
   }
   return html;
+}
+
+function buildImportCalendarRowHtml(dateStr, entry){
+  entry = entry || {};
+  const dp = fmtDateParts(dateStr);
+  return '<tr data-imp-cal-row="'+dateStr+'"><td>'+dp.dnum+'/'+dp.mon+'</td>'
+    + '<td><input data-imp-cal-date="'+dateStr+'" data-imp-cal-field="dia" value="'+escapeHtml(entry.dia||'')+'" style="max-width:56px;"></td>'
+    + '<td><input data-imp-cal-date="'+dateStr+'" data-imp-cal-field="noite" value="'+escapeHtml(entry.noite||'')+'" style="max-width:56px;"></td>'
+    + '<td><button type="button" class="link-btn" style="color:var(--red);" onclick="removeImportCalendarDate(this)" title="Remover esta data do calendário">✕</button></td></tr>';
+}
+
+function removeImportCalendarDate(btn){
+  const row = btn.closest('[data-imp-cal-row]');
+  const wrap = row.closest('.table-wrap');
+  row.remove();
+  const table = wrap ? wrap.querySelector('[data-imp-cal-table]') : null;
+  const remaining = table ? table.querySelectorAll('[data-imp-cal-row]').length : 0;
+  const title = document.querySelector('[data-imp-cal-title]');
+  if(title) title.textContent = 'Calendário ('+remaining+' dia(s))';
+  if(remaining === 0 && wrap){
+    wrap.outerHTML = '<div class="muted-sm" data-imp-cal-empty>Nenhum dia identificado no calendário.</div>';
+  }
 }
 
 function openImportPreviewModal(teams, calendar, calendarFallback){
@@ -1741,6 +1766,7 @@ window.editSignupName = editSignupName;
 window.editSignupPatente = editSignupPatente;
 window.addImportMember = addImportMember;
 window.removeImportMember = removeImportMember;
+window.removeImportCalendarDate = removeImportCalendarDate;
 
 render();
 
