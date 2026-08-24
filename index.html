@@ -165,7 +165,8 @@ let editingShiftId = null;
 let activeTab = 'vagas';
 let importFormOpen = false; // true enquanto o admin está substituindo a escala oficial já importada
 let escalaOficial = null;      // { A:[{nome,patente,cpf}], B:[...], C:[...], D:[...] }
-let calendarioOficial = null;  // { 'YYYY-MM-DD': { dia:'A', noite:'B' }, ... }
+let calendarioOficial = null;  // { 'YYYY-MM-DD': { dia:'A', noite:'B' }, ... } — entradas EXPLÍCITAS (import/edição manual)
+let cicloEscala = null;        // { dataAncora:'YYYY-MM-DD', periodoDias:P, padrao:[{dia,noite}, ...] } ou null — ver detectCiclo()
 
 const RANK_ORDER = ['sgt','cabo','soldado'];
 const RANK_LABEL = {sgt:'Sargento', cabo:'Cabo', soldado:'Soldado'};
@@ -268,6 +269,7 @@ function applyRemoteData(data){
   signups = Object.values(data.signups || {}).map(s=>({...s}));
   escalaOficial = data.escalaOficial || null;
   calendarioOficial = data.calendarioOficial || null;
+  cicloEscala = data.cicloEscala || null;
 }
 
 function handlePersistError(e){
@@ -310,6 +312,20 @@ function persistBulkUpsert(newShifts, newSignups){
 // updateDoc, já que setDoc com merge:true e {} não apaga chaves existentes).
 function persistWipeAll(){
   updateDoc(docRef, { shifts: {}, signups: {} }).catch(handlePersistError);
+}
+// Grava a escala oficial (equipes + calendário + ciclo detectado) substituindo
+// os campos por inteiro. Usa updateDoc (não setDoc com merge:true) de propósito:
+// setDoc({...}, {merge:true}) faz merge PROFUNDO de campos que são mapas —
+// calendarioOficial é um mapa 'YYYY-MM-DD' -> {dia,noite}, então um merge raso
+// nunca apaga datas antigas que não estejam no novo calendário (ex: reimportar
+// agosto depois de já ter julho salvo deixaria os 31 dias de julho "grudados"
+// junto aos de agosto). updateDoc substitui o valor inteiro do campo, sem essa
+// armadilha. Se nenhum ciclo for detectado, cicloEscala é explicitamente
+// apagado (deleteField) em vez de deixar um ciclo antigo e potencialmente
+// inválido para os novos dados.
+function persistEscalaOficial(teams, calendar, ciclo){
+  const patch = { escalaOficial: teams, calendarioOficial: calendar, cicloEscala: ciclo || deleteField() };
+  updateDoc(docRef, patch).catch(handlePersistError);
 }
 
 async function refreshAll(){
@@ -374,6 +390,92 @@ function shiftDateStr(dateStr, deltaDays){
   return dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0');
 }
 
+// ---------- CICLO DE RODÍZIO (detecção automática a partir do calendário oficial) ----------
+
+// Diferença em dias inteiros entre duas datas 'YYYY-MM-DD' (b - a). Construído
+// com o mesmo padrão de Date local usado em shiftDateStr/fmtDateParts (nunca
+// new Date('YYYY-MM-DD'), que o motor interpreta como UTC e pode voltar/
+// avançar um dia ao exibir em fuso horário local, ex: Brasil UTC-3).
+function daysBetween(dateStrA, dateStrB){
+  const a = parseDateStr(dateStrA), b = parseDateStr(dateStrB);
+  if(!a || !b) return null;
+  const dtA = new Date(a.y, a.m-1, a.d);
+  const dtB = new Date(b.y, b.m-1, b.d);
+  return Math.round((dtB - dtA) / 86400000);
+}
+
+// Detecta o menor período P (em dias) tal que o padrão {dia,noite} do
+// calendário se repita a cada P dias, ancorado na data mais antiga presente.
+// Testa P de 2 até metade da quantidade de dias válidos disponíveis, e só
+// aceita um período se TODAS as datas disponíveis forem consistentes com ele
+// (sem contradição) e cada posição do ciclo tiver sido observada em pelo
+// menos 2 datas diferentes (ou seja, pelo menos 2 ciclos completos
+// confirmados nos dados). Datas não precisam ser contíguas — a posição de
+// cada uma no ciclo é calculada pela distância em dias até a âncora, não pelo
+// índice na lista, então buracos no calendário não atrapalham a detecção
+// (só reduzem a quantidade de confirmações disponíveis).
+function detectCiclo(calendario){
+  if(!calendario) return null;
+  const dates = Object.keys(calendario).filter(d=>{
+    const e = calendario[d];
+    return e && e.dia && e.noite;
+  }).sort();
+  const n = dates.length;
+  if(n < 4) return null; // mínimo pra sequer tentar P=2 com 2 ciclos completos
+  const anchor = dates[0];
+  const maxP = Math.floor(n/2);
+  for(let P=2; P<=maxP; P++){
+    const padrao = new Array(P).fill(null);
+    const counts = new Array(P).fill(0);
+    let ok = true;
+    for(const d of dates){
+      const diff = daysBetween(anchor, d);
+      const pos = ((diff % P) + P) % P;
+      const entry = calendario[d];
+      if(padrao[pos] == null){
+        padrao[pos] = { dia: entry.dia, noite: entry.noite };
+      } else if(padrao[pos].dia !== entry.dia || padrao[pos].noite !== entry.noite){
+        ok = false; break;
+      }
+      counts[pos]++;
+    }
+    if(!ok) continue;
+    if(padrao.some(x=>x==null)) continue; // ciclo com posição nunca observada não pode ser confirmado
+    if(Math.min(...counts) < 2) continue; // exige pelo menos 2 ciclos completos confirmados
+    return { dataAncora: anchor, periodoDias: P, padrao };
+  }
+  return null;
+}
+
+// Turno oficial (equipes de dia/noite) de uma data: (a) entrada EXPLÍCITA em
+// calendarioOficial sempre tem prioridade — cobre importações e edições
+// manuais pontuais; (b) na ausência dela, cai pro ciclo de rodízio detectado
+// (se houver), projetando o padrão indefinidamente para o futuro sem exigir
+// reimportação mensal; (c) sem nenhum dos dois, retorna null (comportamento
+// atual: checagem de conflito é pulada pra essa data).
+function getEquipeDoTurno(dataStr){
+  if(calendarioOficial && calendarioOficial[dataStr]) return calendarioOficial[dataStr];
+  if(cicloEscala){
+    const diff = daysBetween(cicloEscala.dataAncora, dataStr);
+    if(diff == null) return null;
+    const P = cicloEscala.periodoDias;
+    const pos = ((diff % P) + P) % P;
+    return cicloEscala.padrao[pos] || null;
+  }
+  return null;
+}
+
+function fmtDateNumeric(dateStr){
+  const p = parseDateStr(dateStr);
+  if(!p) return dateStr;
+  return String(p.d).padStart(2,'0')+'/'+String(p.m).padStart(2,'0')+'/'+p.y;
+}
+
+function formatCicloLabel(ciclo){
+  if(!ciclo) return 'Nenhum ciclo de rodízio detectado com os dados atuais — são necessárias pelo menos 2 repetições completas do padrão para confirmar um ciclo. Enquanto isso, a checagem de conflito vale só para as datas explicitamente importadas/editadas.';
+  return 'Ciclo de rodízio detectado: repete a cada '+ciclo.periodoDias+' dia(s), a partir de '+fmtDateNumeric(ciclo.dataAncora)+' — aplicado automaticamente aos meses seguintes, sem precisar reimportar.';
+}
+
 // Turno Dia = 06:00–18:00. Turno Noite = 18:00–06:00 (atravessa a meia-noite).
 // Retorna quais turnos oficiais (do próprio dia da vaga e, se for o caso, o
 // turno Noite do dia anterior) se sobrepõem ao horário da vaga extra.
@@ -393,11 +495,11 @@ function overlappingTurnos(startTime, endTime){
 // turno que se sobrepõe ao horário da vaga extra. Retorna null se não há
 // conflito (ou se a escala oficial ainda não foi importada).
 function findEscalaConflict(dateStr, startTime, endTime, cpfDigits){
-  if(!escalaOficial || !calendarioOficial) return null;
+  if(!escalaOficial) return null;
   const turnos = overlappingTurnos(startTime, endTime);
   for(const t of turnos){
     const targetDate = t.offsetDays === 0 ? dateStr : shiftDateStr(dateStr, t.offsetDays);
-    const diaCal = calendarioOficial[targetDate];
+    const diaCal = getEquipeDoTurno(targetDate);
     if(!diaCal) continue;
     const equipeLetra = diaCal[t.turno];
     if(!equipeLetra) continue;
@@ -420,9 +522,9 @@ function findEscalaConflict(dateStr, startTime, endTime, cpfDigits){
 // conflito de descanso (ou se a escala oficial ainda não foi importada).
 const DESCANSO_MIN_HORAS = 8;
 function findRestConflict(dateStr, startTime, cpfDigits){
-  if(!escalaOficial || !calendarioOficial) return null;
+  if(!escalaOficial) return null;
   const prevDate = shiftDateStr(dateStr, -1);
-  const diaCal = calendarioOficial[prevDate];
+  const diaCal = getEquipeDoTurno(prevDate);
   if(!diaCal) return null;
   const equipeLetra = diaCal.noite;
   if(!equipeLetra) return null;
@@ -679,7 +781,8 @@ function renderAdmin(){
         periodoLabel = ' ('+dias[0]+' a '+dias[dias.length-1]+')';
       }
     }
-    html += '<div class="muted-sm" style="margin-bottom:10px;">Escala importada: Equipes '+TEAM_LETTERS.join(', ')+' ('+totalPoliciais+' policial(is) no total) &middot; Calendário: '+dias.length+' dia(s) mapeado(s)'+periodoLabel+'.</div>'
+    html += '<div class="muted-sm" style="margin-bottom:6px;">Escala importada: Equipes '+TEAM_LETTERS.join(', ')+' ('+totalPoliciais+' policial(is) no total) &middot; Calendário: '+dias.length+' dia(s) mapeado(s)'+periodoLabel+'.</div>'
+      + '<div class="muted-sm" style="margin-bottom:10px;'+(cicloEscala?'color:var(--green);':'color:var(--amber);')+'">'+escapeHtml(formatCicloLabel(cicloEscala))+'</div>'
       + '<div style="display:flex;gap:8px;flex-wrap:wrap;">'
       + '<button class="btn btn-ghost btn-sm" id="imp-replace-btn">Substituir escala</button>'
       + '<button class="btn btn-ghost btn-sm" id="imp-manual-edit-btn">Editar manualmente</button>'
@@ -1370,6 +1473,8 @@ function openImportPreviewModal(teams, calendar, calendarFallback){
   }
   TEAM_LETTERS.forEach(letter=>{ inner += buildTeamSectionHtml(letter, teams[letter] || []); });
   inner += buildCalendarSectionHtml(calendar);
+  const previewCiclo = detectCiclo(calendar);
+  inner += '<div class="muted-sm" style="margin-top:8px;'+(previewCiclo?'color:var(--green);':'color:var(--amber);')+'">'+escapeHtml(formatCicloLabel(previewCiclo))+'</div>';
   inner += '<div class="modal-actions"><button class="btn btn-ghost" id="imp-cancel">Cancelar</button><button class="btn btn-primary" id="imp-confirm">Confirmar e salvar</button></div>'
     + '</div>';
   bg.innerHTML = inner;
@@ -1394,13 +1499,15 @@ function openImportPreviewModal(teams, calendar, calendarFallback){
       finalCalendar[dateStr][field] = input.value.trim().toUpperCase();
     });
 
+    const finalCiclo = detectCiclo(finalCalendar);
     escalaOficial = finalTeams;
     calendarioOficial = finalCalendar;
+    cicloEscala = finalCiclo;
     importFormOpen = false;
     bg.remove();
-    showToast('Escala oficial importada e salva');
+    showToast(finalCiclo ? 'Escala oficial importada e salva — ciclo de rodízio de '+finalCiclo.periodoDias+' dia(s) detectado' : 'Escala oficial importada e salva');
     render();
-    persist({ escalaOficial: finalTeams, calendarioOficial: finalCalendar });
+    persistEscalaOficial(finalTeams, finalCalendar, finalCiclo);
   };
 }
 
