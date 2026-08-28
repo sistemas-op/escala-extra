@@ -407,6 +407,17 @@ function cpfMatchesMasked(inputDigits, storedCpfRaw){
   return true;
 }
 
+// Policiais cuja função contém "suplementar" (ex: "RPA Suplementar") têm
+// horário variável, decidido à parte — não seguem o turno fixo Dia (06-18) /
+// Noite (18-06) do calendário de rodízio, então são ignorados apenas na
+// checagem de conflito de escala/descanso mínimo (ver findEscalaConflict e
+// findRestConflict). Eles continuam aparecendo normalmente em todas as telas
+// de cadastro/edição da escala de equipes — isso só afeta essas duas checagens.
+function isFuncaoSuplementar(funcao){
+  const normalized = (funcao||'').normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase();
+  return normalized.includes('suplementar');
+}
+
 function shiftDateStr(dateStr, deltaDays){
   const [y,m,d] = dateStr.split('-').map(Number);
   const dt = new Date(y, m-1, d + deltaDays);
@@ -552,7 +563,7 @@ function findEscalaConflict(dateStr, startTime, endTime, cpfDigits){
     if(!periodo) continue;
     const membros = periodo.equipes[equipeLetra];
     if(!membros) continue;
-    const found = membros.find(m=> cpfMatchesMasked(cpfDigits, m.cpf));
+    const found = membros.find(m=> !isFuncaoSuplementar(m.funcao) && cpfMatchesMasked(cpfDigits, m.cpf));
     if(found){
       return { equipe: equipeLetra, turnoLabel: TURNO_LABEL[t.turno], date: targetDate };
     }
@@ -579,7 +590,7 @@ function findRestConflict(dateStr, startTime, cpfDigits){
   if(!periodo) return null;
   const membros = periodo.equipes[equipeLetra];
   if(!membros) return null;
-  const found = membros.find(m=> cpfMatchesMasked(cpfDigits, m.cpf));
+  const found = membros.find(m=> !isFuncaoSuplementar(m.funcao) && cpfMatchesMasked(cpfDigits, m.cpf));
   if(!found) return null;
   const toMin = t=>{ const [h,m]=t.split(':').map(Number); return h*60+m; };
   const liberadoAPartirDe = 6*60 + DESCANSO_MIN_HORAS*60; // 06:00 + 8h = 14:00
