@@ -966,6 +966,7 @@ function renderAdmin(){
     + '<div class="field"><label>Liberar inicialmente para</label><select id="nf-fase">'+faseSelectOptions('sgt')+'</select></div>'
     + '<button type="submit" class="btn btn-primary btn-block" id="nf-add">Adicionar vaga</button>'
     + '</form>'
+    + '<button class="btn btn-ghost btn-sm" style="margin-top:10px;" id="lote-open-btn">Importar vagas em lote</button>'
     + '</div>';
 
   html += '<div class="refresh-row"><span class="muted-sm">'+shifts.length+' vaga(s) cadastradas</span><button class="link-btn" onclick="refreshAll()">Atualizar</button></div>';
@@ -1111,6 +1112,8 @@ function renderAdmin(){
       persistShiftUpsert(newShift);
     };
   }
+  const loteOpenBtn = el.querySelector('#lote-open-btn');
+  if(loteOpenBtn){ loteOpenBtn.onclick = openLoteImportModal; }
   const efCancel = el.querySelector('#ef-cancel');
   if(efCancel){ efCancel.onclick = ()=>{ editingShiftId = null; render(); }; }
   const efForm = el.querySelector('#ef-form');
@@ -1972,6 +1975,117 @@ function exportEscalaXlsx(){
 
   const todayStr = today.getFullYear()+'-'+String(today.getMonth()+1).padStart(2,'0')+'-'+String(today.getDate()).padStart(2,'0');
   window.XLSX.writeFile(wb, 'escala-extra-'+todayStr+'.xlsx');
+}
+
+// ---------- IMPORTAÇÃO DE VAGAS EM LOTE (colar texto, uma vaga por linha) ----------
+
+const LOTE_TIME_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
+
+// Interpreta uma linha no formato 'DD/MM/AAAA;HH:MM;HH:MM;Local;Viatura;Vagas;Fase'.
+// Retorna null para linha em branco (ignorada silenciosamente, não conta como
+// inválida); senão { raw, valid, shift } (quando válida) ou { raw, valid:false, error }.
+function parseLoteLine(rawLine){
+  const line = rawLine.trim();
+  if(!line) return null;
+  const parts = line.split(';');
+  if(parts.length !== 7){
+    return { raw: rawLine, valid: false, error: 'Esperado 7 campos separados por ";" (encontrado '+parts.length+')' };
+  }
+  const [dataStr, startStr, endStr, localRaw, viaturaRaw, vagasStr, faseRaw] = parts.map(p=>p.trim());
+  const errors = [];
+
+  let dateOut = null;
+  const dm = dataStr.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if(!dm){
+    errors.push('data inválida (use DD/MM/AAAA)');
+  } else {
+    const d = parseInt(dm[1],10), m = parseInt(dm[2],10), y = parseInt(dm[3],10);
+    if(d < 1 || d > 31 || m < 1 || m > 12) errors.push('data inválida (use DD/MM/AAAA)');
+    else dateOut = y+'-'+String(m).padStart(2,'0')+'-'+String(d).padStart(2,'0');
+  }
+
+  if(!LOTE_TIME_RE.test(startStr)) errors.push('horário de início inválido (use HH:MM)');
+  if(!LOTE_TIME_RE.test(endStr)) errors.push('horário de término inválido (use HH:MM)');
+
+  const vagasNum = parseInt(vagasStr, 10);
+  if(!/^\d+$/.test(vagasStr) || vagasNum < 1) errors.push('quantidade de vagas inválida (use um número inteiro ≥ 1)');
+
+  const faseNorm = faseRaw.toLowerCase();
+  if(!FASE_OPTIONS.some(o=>o.v===faseNorm)) errors.push('fase não reconhecida (use sgt, cabo, soldado ou todos)');
+
+  if(errors.length > 0) return { raw: rawLine, valid: false, error: errors.join('; ') };
+  return { raw: rawLine, valid: true, shift: { date: dateOut, startTime: startStr, endTime: endStr, local: localRaw, viatura: viaturaRaw, vagas: vagasNum, fase: faseNorm } };
+}
+
+// Monta o HTML da tabela de prévia a partir do texto colado (uma linha por
+// vaga) e devolve também as vagas válidas já prontas pra persistir e as
+// contagens — usado tanto pra atualizar a prévia a cada tecla quanto pra
+// decidir o que criar ao confirmar.
+function buildLotePreview(text){
+  const parsed = text.split(/\r?\n/).map(parseLoteLine).filter(Boolean); // linhas em branco viram null e são descartadas aqui
+  if(parsed.length === 0){
+    return { html: '<div class="muted-sm">Cole as vagas na área de texto acima para ver a prévia aqui.</div>', validCount: 0, invalidCount: 0, validShifts: [] };
+  }
+  let html = '<div class="table-wrap"><table class="roster"><thead><tr><th>Data</th><th>Horário</th><th>Local</th><th>Viatura</th><th>Vagas</th><th>Fase</th><th>Status</th></tr></thead><tbody>';
+  let validCount = 0, invalidCount = 0;
+  const validShifts = [];
+  parsed.forEach(p=>{
+    if(p.valid){
+      validCount++;
+      validShifts.push(p.shift);
+      const dp = fmtDateParts(p.shift.date);
+      html += '<tr><td>'+dp.dnum+'/'+dp.mon+'</td><td>'+escapeHtml(p.shift.startTime)+'–'+escapeHtml(p.shift.endTime)+'</td>'
+        + '<td>'+escapeHtml(p.shift.local||'—')+'</td><td>'+escapeHtml(p.shift.viatura||'—')+'</td>'
+        + '<td>'+p.shift.vagas+'</td><td>'+escapeHtml(faseLabel(p.shift.fase))+'</td>'
+        + '<td style="color:var(--green);">OK</td></tr>';
+    } else {
+      invalidCount++;
+      html += '<tr style="color:var(--red);"><td colspan="7" style="font-family:\'JetBrains Mono\',monospace;font-size:12px;">'+escapeHtml(p.raw)+'</td></tr>'
+        + '<tr style="color:var(--red);"><td colspan="7" style="padding-top:0;font-size:11.5px;">↳ '+escapeHtml(p.error)+'</td></tr>';
+    }
+  });
+  html += '</tbody></table></div>'
+    + '<div class="muted-sm" style="margin-top:8px;">'+validCount+' vaga(s) válida(s)'+(invalidCount>0 ? ', '+invalidCount+' linha(s) inválida(s) (corrija e cole novamente, se quiser)' : '')+'.</div>';
+  return { html, validCount, invalidCount, validShifts };
+}
+
+function openLoteImportModal(){
+  const bg = document.createElement('div');
+  bg.className = 'modal-bg';
+  bg.innerHTML = '<div class="modal" style="max-width:640px;">'
+    + '<h3>Importar vagas em lote</h3>'
+    + '<div class="muted-sm" style="margin-bottom:8px;">Cole uma vaga por linha, no formato: <span style="font-family:\'JetBrains Mono\',monospace;">DD/MM/AAAA;HH:MM;HH:MM;Local;Viatura;Vagas;Fase</span>. Fase pode ser <b>sgt</b>, <b>cabo</b>, <b>soldado</b> ou <b>todos</b>. Local e Viatura podem ficar vazios entre os pontos e vírgulas. Nenhum voluntário é criado — só as vagas.</div>'
+    + '<div class="muted-sm" style="margin-bottom:12px;font-family:\'JetBrains Mono\',monospace;font-size:11.5px;">Ex: 05/09/2026;08:00;14:00;RPA Suplementar;1204;2;todos</div>'
+    + '<div class="field"><label>Vagas (uma por linha)</label><textarea id="lote-textarea" rows="8" placeholder="05/09/2026;08:00;14:00;RPA Suplementar;1204;2;todos" style="width:100%;background:var(--panel-2);border:1px solid var(--border);color:var(--text);padding:10px 12px;border-radius:var(--r-sm);font-family:\'JetBrains Mono\',monospace;font-size:12.5px;margin-top:6px;resize:vertical;"></textarea></div>'
+    + '<div id="lote-preview">'+buildLotePreview('').html+'</div>'
+    + '<div class="modal-actions"><button type="button" class="btn btn-ghost" id="lote-cancel">Cancelar</button><button type="button" class="btn btn-primary" id="lote-confirm" disabled>Confirmar e criar todas</button></div>'
+    + '</div>';
+  document.body.appendChild(bg);
+
+  const textarea = bg.querySelector('#lote-textarea');
+  const previewEl = bg.querySelector('#lote-preview');
+  const confirmBtn = bg.querySelector('#lote-confirm');
+  if(isDesktopViewport()) textarea.focus();
+
+  let lastResult = { validCount: 0, invalidCount: 0, validShifts: [] };
+  const updatePreview = ()=>{
+    lastResult = buildLotePreview(textarea.value);
+    previewEl.innerHTML = lastResult.html;
+    confirmBtn.disabled = lastResult.validCount === 0;
+  };
+  textarea.oninput = updatePreview;
+
+  bg.querySelector('#lote-cancel').onclick = ()=> bg.remove();
+  confirmBtn.onclick = ()=>{
+    if(lastResult.validCount === 0) return;
+    const newShifts = lastResult.validShifts.map(s=> ({ id: uid(), ...s }));
+    shifts.push(...newShifts);
+    sortShifts();
+    bg.remove();
+    showToast(lastResult.validCount+' vaga(s) criada(s)'+(lastResult.invalidCount>0 ? ', '+lastResult.invalidCount+' linha(s) inválida(s) ignorada(s)' : ''));
+    render();
+    persistBulkUpsert(newShifts, []);
+  };
 }
 
 function deleteShift(id){
