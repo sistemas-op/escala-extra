@@ -168,6 +168,8 @@ let equipesImportFormOpen = false; // true enquanto o admin está importando um 
 let calendarioOficial = null;  // { 'YYYY-MM-DD': { dia:'A', noite:'B' }, ... } — entradas EXPLÍCITAS (import/edição manual); dado único e independente dos períodos de escala
 let cicloEscala = null;        // { dataAncora:'YYYY-MM-DD', periodoDias:P, padrao:[{dia,noite}, ...] } ou null — ver detectCiclo()
 let calendarImportFormOpen = false; // true enquanto o admin está substituindo o calendário mensal já importado
+let lixeira = [];              // [{ id, timestamp:ISO, tipo:'apagar_tudo'|'excluir_vaga', dadosOriginais:{shifts:[...], signups:[...]} }, ...] — mais recente primeiro; ver addLixeiraEntry()
+const LIXEIRA_MAX = 20;        // entradas mais antigas além desse limite são descartadas ao adicionar uma nova
 
 const RANK_ORDER = ['sgt','cabo','soldado'];
 const RANK_LABEL = {sgt:'Sargento', cabo:'Cabo', soldado:'Soldado'};
@@ -271,6 +273,7 @@ function applyRemoteData(data){
   periodosEscala = migratePeriodosEscala(data);
   calendarioOficial = data.calendarioOficial || null;
   cicloEscala = data.cicloEscala || null;
+  lixeira = Array.isArray(data.lixeira) ? data.lixeira : [];
 }
 
 // Compatibilidade com dados antigos: documentos gravados antes da introdução
@@ -303,12 +306,17 @@ function persist(patch){
 function persistShiftUpsert(shift){
   setDoc(docRef, { shifts: { [shift.id]: shift } }, { merge: true }).catch(handlePersistError);
 }
-function persistShiftDelete(id, cascadeSignupIds){
+// newLixeira (opcional) é gravado junto, no mesmo patch — garante que a
+// entrada da lixeira e a exclusão da vaga cheguem ao Firestore como uma única
+// escrita (sem risco de a vaga sumir sem que a cópia de segurança tenha sido
+// salva antes).
+function persistShiftDelete(id, cascadeSignupIds, newLixeira){
   const patch = { shifts: { [id]: deleteField() } };
   if(cascadeSignupIds && cascadeSignupIds.length){
     patch.signups = {};
     cascadeSignupIds.forEach(sid=>{ patch.signups[sid] = deleteField(); });
   }
+  if(newLixeira) patch.lixeira = newLixeira;
   setDoc(docRef, patch, { merge: true }).catch(handlePersistError);
 }
 function persistSignupUpsert(su){
@@ -326,8 +334,75 @@ function persistBulkUpsert(newShifts, newSignups){
 }
 // "Apagar tudo": substitui os mapas inteiros por vazios (precisa de
 // updateDoc, já que setDoc com merge:true e {} não apaga chaves existentes).
-function persistWipeAll(){
-  updateDoc(docRef, { shifts: {}, signups: {} }).catch(handlePersistError);
+// newLixeira (opcional) é gravado no mesmo updateDoc — a cópia de segurança
+// entra no documento atomicamente junto com o próprio wipe.
+function persistWipeAll(newLixeira){
+  const patch = { shifts: {}, signups: {} };
+  if(newLixeira) patch.lixeira = newLixeira;
+  updateDoc(docRef, patch).catch(handlePersistError);
+}
+// Monta uma nova entrada de lixeira (cópia profunda dos dados que a ação
+// destrutiva está prestes a apagar) e devolve a lista já atualizada — mais
+// recente primeiro, truncada em LIXEIRA_MAX. Só atualiza 'lixeira' em
+// memória; quem chama é responsável por incluir a lista devolvida no mesmo
+// patch/persist da ação destrutiva (ver persistShiftDelete/persistWipeAll).
+function addLixeiraEntry(tipo, dadosOriginais){
+  const entry = {
+    id: uid(),
+    timestamp: new Date().toISOString(),
+    tipo,
+    dadosOriginais: JSON.parse(JSON.stringify(dadosOriginais))
+  };
+  lixeira = [entry, ...lixeira].slice(0, LIXEIRA_MAX);
+  return lixeira;
+}
+
+const LIXEIRA_TIPO_LABEL = { apagar_tudo: 'Apagar tudo', excluir_vaga: 'Excluir vaga' };
+
+function fmtLixeiraTimestamp(iso){
+  const d = new Date(iso);
+  if(isNaN(d)) return '--';
+  const pad = n=>String(n).padStart(2,'0');
+  return pad(d.getDate())+'/'+pad(d.getMonth()+1)+'/'+d.getFullYear()+' '+pad(d.getHours())+':'+pad(d.getMinutes());
+}
+
+// Resumo legível de uma entrada, ex: "3 vaga(s) e 7 voluntário(s)" (apagar
+// tudo) ou "Vaga de 04/09 às 08:00 (2 voluntário(s))" (excluir vaga).
+function lixeiraResumo(entry){
+  const d = entry.dadosOriginais || {};
+  const shiftsList = d.shifts || [];
+  const signupsList = d.signups || [];
+  if(entry.tipo === 'excluir_vaga'){
+    const s = shiftsList[0];
+    if(!s) return signupsList.length+' voluntário(s)';
+    const dp = fmtDateParts(s.date);
+    return 'Vaga de '+dp.dnum+'/'+dp.mon+' às '+(s.startTime||'--:--')+' ('+signupsList.length+' voluntário(s))';
+  }
+  return shiftsList.length+' vaga(s) e '+signupsList.length+' voluntário(s)';
+}
+
+// Restaura uma entrada da lixeira: acrescenta de volta só os shifts/signups
+// cujo id ainda não existe no estado atual (merge aditivo puro) — nunca
+// sobrescreve nem apaga nada criado depois da ação original que gerou essa
+// entrada.
+function restaurarLixeira(id){
+  const entry = lixeira.find(x=>x.id===id);
+  if(!entry) return;
+  openConfirmModal({
+    titulo: 'Restaurar esta entrada da lixeira?',
+    mensagem: 'Isso vai recolocar de volta: '+lixeiraResumo(entry)+'. Dados criados depois dessa ação não são apagados — a restauração só adiciona de volta o que estava faltando.',
+    textoConfirmar: 'Sim, restaurar',
+    onConfirm: ()=>{
+      const restoredShifts = (entry.dadosOriginais.shifts || []).filter(s=> !shifts.some(x=>x.id===s.id));
+      const restoredSignups = (entry.dadosOriginais.signups || []).filter(su=> !signups.some(x=>x.id===su.id));
+      restoredShifts.forEach(s=> shifts.push({...s}));
+      restoredSignups.forEach(su=> signups.push({...su}));
+      sortShifts();
+      showToast('Dados restaurados');
+      render();
+      persistBulkUpsert(restoredShifts, restoredSignups);
+    }
+  });
 }
 // Grava o array de períodos de escala por inteiro (substitui, não faz merge
 // elemento a elemento — cada chamada já reflete o array completo e atualizado
@@ -954,6 +1029,24 @@ function renderAdmin(){
         + '<td><button class="link-btn" style="color:var(--red);" onclick="removeSignup(\''+su.id+'\')">remover</button></td>'
         + '</tr>';
     }
+    html += '</tbody></table></div>';
+  }
+  html += '</div>';
+
+  // --- Lixeira / Ações Recentes — só na Administração (protegida por PIN),
+  // nunca aparece na tela pública (renderVagas nem sequer lê 'lixeira').
+  html += '<div class="card"><div class="section-title">Lixeira / Ações Recentes</div>';
+  if(lixeira.length === 0){
+    html += '<div class="muted-sm">Nenhuma ação destrutiva registrada ainda.</div>';
+  } else {
+    html += '<div class="muted-sm" style="margin-bottom:10px;">Cópia de segurança automática das últimas '+LIXEIRA_MAX+' ações de "Apagar tudo" / "Excluir vaga". Restaurar acrescenta os dados de volta sem apagar nada criado depois.</div>';
+    html += '<div class="table-wrap"><table class="roster"><thead><tr><th>Quando</th><th>Ação</th><th>Resumo</th><th></th></tr></thead><tbody>';
+    lixeira.forEach(entry=>{
+      html += '<tr><td>'+fmtLixeiraTimestamp(entry.timestamp)+'</td>'
+        + '<td>'+escapeHtml(LIXEIRA_TIPO_LABEL[entry.tipo] || entry.tipo)+'</td>'
+        + '<td>'+escapeHtml(lixeiraResumo(entry))+'</td>'
+        + '<td><button class="btn btn-ghost btn-sm" onclick="restaurarLixeira(\''+entry.id+'\')">Restaurar</button></td></tr>';
+    });
     html += '</tbody></table></div>';
   }
   html += '</div>';
@@ -1888,12 +1981,15 @@ function deleteShift(id){
     textoConfirmar: 'Sim, excluir vaga',
     perigo: true,
     onConfirm: ()=>{
-      const cascadeIds = signups.filter(s=>s.shiftId===id).map(s=>s.id);
+      const shift = shifts.find(s=>s.id===id);
+      const relatedSignups = signups.filter(s=>s.shiftId===id);
+      const newLixeira = addLixeiraEntry('excluir_vaga', { shifts: shift ? [shift] : [], signups: relatedSignups });
+      const cascadeIds = relatedSignups.map(s=>s.id);
       shifts = shifts.filter(s=>s.id!==id);
       signups = signups.filter(s=>s.shiftId!==id);
       showToast('Vaga excluída');
       render();
-      persistShiftDelete(id, cascadeIds);
+      persistShiftDelete(id, cascadeIds, newLixeira);
     }
   });
 }
@@ -1939,11 +2035,12 @@ function clearAllData(){
     textoConfirmar: 'Sim, apagar tudo',
     perigo: true,
     onConfirm: ()=>{
+      const newLixeira = addLixeiraEntry('apagar_tudo', { shifts, signups });
       shifts = [];
       signups = [];
       showToast('Tudo apagado');
       render();
-      persistWipeAll();
+      persistWipeAll(newLixeira);
     }
   });
 }
@@ -2002,6 +2099,7 @@ window.removeImportMember = removeImportMember;
 window.removeImportCalendarDate = removeImportCalendarDate;
 window.editPeriodo = editPeriodo;
 window.deletePeriodo = deletePeriodo;
+window.restaurarLixeira = restaurarLixeira;
 
 render();
 
