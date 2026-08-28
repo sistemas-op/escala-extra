@@ -1079,6 +1079,28 @@ function openChangePinModal(){
   };
 }
 
+// Modal de confirmação genérico, no mesmo padrão visual dos demais modais do
+// app (modal-bg/modal/modal-actions) — substitui confirm() nativo do
+// navegador para ações relevantes (o sistema está em produção com dados reais
+// dos policiais, e um confirm() nativo é fácil demais de descartar/aceitar
+// sem ler por reflexo). 'perigo:true' aplica o tom visual de alerta mais
+// forte (ícone, mensagem em vermelho e botão de confirmação btn-danger) —
+// use para ações destrutivas/irreversíveis; sem isso, o botão de confirmação
+// usa btn-primary (ex: ações informativas, não-destrutivas).
+function openConfirmModal({ titulo, mensagem, textoConfirmar, onConfirm, perigo }){
+  const bg = document.createElement('div');
+  bg.className = 'modal-bg';
+  bg.innerHTML = '<div class="modal">'
+    + '<h3>'+escapeHtml(titulo)+'</h3>'
+    + (perigo ? '<div style="font-size:30px;text-align:center;margin-bottom:8px;">⚠️</div>' : '')
+    + '<div style="margin-bottom:16px;'+(perigo ? 'color:var(--red);font-weight:600;line-height:1.5;' : 'color:var(--muted);line-height:1.5;')+'">'+escapeHtml(mensagem)+'</div>'
+    + '<div class="modal-actions"><button type="button" class="btn btn-ghost" id="confirm-cancel">Cancelar</button><button type="button" class="btn '+(perigo ? 'btn-danger' : 'btn-primary')+'" id="confirm-ok">'+escapeHtml(textoConfirmar||'Confirmar')+'</button></div>'
+    + '</div>';
+  document.body.appendChild(bg);
+  bg.querySelector('#confirm-cancel').onclick = ()=> bg.remove();
+  bg.querySelector('#confirm-ok').onclick = ()=>{ bg.remove(); onConfirm(); };
+}
+
 // ---------- IMPORTAÇÃO DA ESCALA MENSAL (PDF de equipes + calendário em DOCX/XLSX/ODS/CSV) ----------
 
 function getFileExt(filename){
@@ -1860,50 +1882,70 @@ function exportEscalaXlsx(){
 }
 
 function deleteShift(id){
-  if(!confirm('Excluir esta vaga? Os voluntários cadastrados nela também serão removidos.')) return;
-  const cascadeIds = signups.filter(s=>s.shiftId===id).map(s=>s.id);
-  shifts = shifts.filter(s=>s.id!==id);
-  signups = signups.filter(s=>s.shiftId!==id);
-  showToast('Vaga excluída');
-  render();
-  persistShiftDelete(id, cascadeIds);
+  openConfirmModal({
+    titulo: 'Excluir esta vaga?',
+    mensagem: 'Excluir esta vaga? Os voluntários cadastrados nela também serão removidos.',
+    textoConfirmar: 'Sim, excluir vaga',
+    perigo: true,
+    onConfirm: ()=>{
+      const cascadeIds = signups.filter(s=>s.shiftId===id).map(s=>s.id);
+      shifts = shifts.filter(s=>s.id!==id);
+      signups = signups.filter(s=>s.shiftId!==id);
+      showToast('Vaga excluída');
+      render();
+      persistShiftDelete(id, cascadeIds);
+    }
+  });
 }
 
 function loadDemoData(){
-  if(!confirm('Isso vai adicionar vagas e voluntários de exemplo para você visualizar. Continuar?')) return;
-  const today = new Date();
-  const d1 = new Date(today); d1.setDate(d1.getDate()+3);
-  const d2 = new Date(today); d2.setDate(d2.getDate()+5);
-  const d3 = new Date(today); d3.setDate(d3.getDate()+7);
-  // Monta 'YYYY-MM-DD' a partir dos getters locais (mesmo padrão usado em
-  // shiftDateStr/fmtDateParts) em vez de toISOString(), que converte para UTC
-  // e pode voltar a data em 1 dia em fusos atrás de UTC (ex: Brasil, UTC-3).
-  const fmt = (d)=> d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
-  const s1 = { id: uid(), date: fmt(d1), startTime:'08:00', endTime:'14:00', local:'Batalhão Central', viatura:'1204', vagas:3, fase:'cabo' };
-  const s2 = { id: uid(), date: fmt(d2), startTime:'19:00', endTime:'23:00', local:'Evento - Estádio', viatura:'0817', vagas:2, fase:'soldado' };
-  const s3 = { id: uid(), date: fmt(d3), startTime:'06:00', endTime:'12:00', local:'Operação Rodovia', viatura:'', vagas:4, fase:'sgt' };
-  shifts.push(s1, s2, s3);
-  sortShifts();
-  const demoSignups = [
-    { id: uid(), shiftId: s1.id, nome: '3º Sgt Carvalho', patente:'sgt', timestamp: new Date().toISOString() },
-    { id: uid(), shiftId: s1.id, nome: 'Cb Ferreira', patente:'cabo', timestamp: new Date().toISOString() },
-    { id: uid(), shiftId: s2.id, nome: 'Sd Almeida', patente:'soldado', timestamp: new Date().toISOString() },
-    { id: uid(), shiftId: s2.id, nome: 'Sd Rocha', patente:'soldado', timestamp: new Date().toISOString() },
-    { id: uid(), shiftId: s3.id, nome: '2º Sgt Barros', patente:'sgt', timestamp: new Date().toISOString() },
-  ];
-  signups.push(...demoSignups);
-  showToast('Exemplo carregado');
-  render();
-  persistBulkUpsert([s1, s2, s3], demoSignups);
+  openConfirmModal({
+    titulo: 'Carregar dados de exemplo?',
+    mensagem: 'Isso vai adicionar vagas e voluntários fictícios à base de dados atual, que já tem dados reais dos policiais. Continuar?',
+    textoConfirmar: 'Sim, carregar exemplo',
+    onConfirm: ()=>{
+      const today = new Date();
+      const d1 = new Date(today); d1.setDate(d1.getDate()+3);
+      const d2 = new Date(today); d2.setDate(d2.getDate()+5);
+      const d3 = new Date(today); d3.setDate(d3.getDate()+7);
+      // Monta 'YYYY-MM-DD' a partir dos getters locais (mesmo padrão usado em
+      // shiftDateStr/fmtDateParts) em vez de toISOString(), que converte para UTC
+      // e pode voltar a data em 1 dia em fusos atrás de UTC (ex: Brasil, UTC-3).
+      const fmt = (d)=> d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+      const s1 = { id: uid(), date: fmt(d1), startTime:'08:00', endTime:'14:00', local:'Batalhão Central', viatura:'1204', vagas:3, fase:'cabo' };
+      const s2 = { id: uid(), date: fmt(d2), startTime:'19:00', endTime:'23:00', local:'Evento - Estádio', viatura:'0817', vagas:2, fase:'soldado' };
+      const s3 = { id: uid(), date: fmt(d3), startTime:'06:00', endTime:'12:00', local:'Operação Rodovia', viatura:'', vagas:4, fase:'sgt' };
+      shifts.push(s1, s2, s3);
+      sortShifts();
+      const demoSignups = [
+        { id: uid(), shiftId: s1.id, nome: '3º Sgt Carvalho', patente:'sgt', timestamp: new Date().toISOString() },
+        { id: uid(), shiftId: s1.id, nome: 'Cb Ferreira', patente:'cabo', timestamp: new Date().toISOString() },
+        { id: uid(), shiftId: s2.id, nome: 'Sd Almeida', patente:'soldado', timestamp: new Date().toISOString() },
+        { id: uid(), shiftId: s2.id, nome: 'Sd Rocha', patente:'soldado', timestamp: new Date().toISOString() },
+        { id: uid(), shiftId: s3.id, nome: '2º Sgt Barros', patente:'sgt', timestamp: new Date().toISOString() },
+      ];
+      signups.push(...demoSignups);
+      showToast('Exemplo carregado');
+      render();
+      persistBulkUpsert([s1, s2, s3], demoSignups);
+    }
+  });
 }
 
 function clearAllData(){
-  if(!confirm('Isso vai apagar TODAS as vagas e voluntários (inclusive os reais, se já tiver algum). Tem certeza?')) return;
-  shifts = [];
-  signups = [];
-  showToast('Tudo apagado');
-  render();
-  persistWipeAll();
+  openConfirmModal({
+    titulo: 'Apagar todas as vagas e voluntários?',
+    mensagem: 'Esta ação é irreversível e vai apagar PERMANENTEMENTE todas as vagas extras e voluntários cadastrados atualmente, incluindo dados reais dos policiais. Esta ação não pode ser desfeita.',
+    textoConfirmar: 'Sim, apagar tudo',
+    perigo: true,
+    onConfirm: ()=>{
+      shifts = [];
+      signups = [];
+      showToast('Tudo apagado');
+      render();
+      persistWipeAll();
+    }
+  });
 }
 
 // Mostra/esconde a tela de bloqueio total, sobrepondo qualquer outro
