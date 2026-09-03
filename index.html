@@ -132,6 +132,8 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.7.2/mammoth.browser.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<!-- "docx" (dolanmiu/docx) não é espelhada no cdnjs — usamos o build UMD oficial via jsDelivr, que expõe window.docx -->
+<script src="https://cdn.jsdelivr.net/npm/docx@8.5.0/build/index.umd.min.js"></script>
 
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
@@ -173,6 +175,7 @@ const LIXEIRA_MAX = 20;        // entradas mais antigas além desse limite são 
 
 const RANK_ORDER = ['sgt','cabo','soldado'];
 const RANK_LABEL = {sgt:'Sargento', cabo:'Cabo', soldado:'Soldado'};
+const RANK_ABBR = {sgt:'Sgt.', cabo:'Cb.', soldado:'Sd.'}; // usado no relatório oficial (coluna "PMs ESCALADO")
 const TEAM_LETTERS = ['A','B','C','D'];
 const TURNO_LABEL = { dia: 'Dia', noite: 'Noite' };
 
@@ -893,7 +896,8 @@ function renderAdmin(){
 
   let html = '<div class="card" style="display:flex;gap:8px;flex-wrap:wrap;">'
     + '<button class="btn btn-blue btn-sm" id="demo-btn">Carregar exemplo</button>'
-    + '<button class="btn btn-blue btn-sm" id="export-xlsx-btn">Gerar planilha (Excel)</button>'
+    + '<button class="btn btn-blue btn-sm" id="export-xlsx-btn">Gerar relatório (Excel)</button>'
+    + '<button class="btn btn-blue btn-sm" id="export-docx-btn">Gerar relatório (Word)</button>'
     + '<button class="btn btn-danger btn-sm" id="clear-btn">Apagar tudo</button>'
     + '</div>';
 
@@ -1060,6 +1064,8 @@ function renderAdmin(){
   if(demoBtn){ demoBtn.onclick = loadDemoData; }
   const exportBtn = el.querySelector('#export-xlsx-btn');
   if(exportBtn){ exportBtn.onclick = exportEscalaXlsx; }
+  const exportDocxBtn = el.querySelector('#export-docx-btn');
+  if(exportDocxBtn){ exportDocxBtn.onclick = exportEscalaDocx; }
   const clearBtn = el.querySelector('#clear-btn');
   if(clearBtn){ clearBtn.onclick = clearAllData; }
   const impEquipesOpenBtn = el.querySelector('#imp-equipes-open-btn');
@@ -1866,115 +1872,172 @@ function editSignupPatente(id, newPatente){
   persistSignupUpsert(su);
 }
 
-// ---------- EXPORTAÇÃO DA ESCALA (XLSX) ----------
+// ---------- EXPORTAÇÃO DA ESCALA (modelo oficial — XLSX e DOCX) ----------
 
-function exportEscalaXlsx(){
-  if(!window.XLSX){ showToast('Biblioteca de planilhas não carregou. Recarregue a página.'); return; }
+const ESCALA_REPORT_TITLE = 'ESCALA EXTRAJORNADA VOLUNTÁRIA – 1ª CIA/16º BPM';
+const ESCALA_REPORT_HEADERS = ['CIDADE', 'DIA E HORÁRIO', 'VTR - Setor', 'PMs ESCALADO'];
 
+// Monta, por vaga futura ("upcoming": data >= hoje), os dados já no formato
+// do modelo oficial. Cada bloco vira 1+ linhas na tabela final: uma linha por
+// voluntário (mínimo 1, mesmo sem voluntário nenhum, pra vaga aparecer vazia),
+// com Cidade/Dia e Horário/VTR-Setor repetidos apenas na 1ª linha do bloco —
+// as demais colunas dessas ficam mescladas verticalmente por quem consome
+// este array (ver exportEscalaXlsx/exportEscalaDocx).
+function buildEscalaReportBlocks(){
   const today = new Date(); today.setHours(0,0,0,0);
   const upcoming = shifts
     .filter(s=>{ const p=parseDateStr(s && s.date); return p ? new Date(p.y,p.m-1,p.d) >= today : false; })
     .slice()
     .sort((a,b)=> (a.date+a.startTime).localeCompare(b.date+b.startTime));
 
-  const headers = ['Data','Dia da semana','Horário','Local','Viatura','Liberado para','Nome do voluntário','Patente'];
-  const rows = [headers];
-  const merges = [];
-  const vagaBlocks = []; // {startRow,endRow} de cada vaga — usado pra cor alternada
-  const MERGE_COLS = [0,1,2,3,4,5]; // Data..Liberado para (Nome/Patente ficam por linha)
-
-  upcoming.forEach((s, vagaIdx)=>{
-    const dp = fmtDateParts(s.date);
+  return upcoming.map(s=>{
     const [y,m,d] = s.date.split('-');
     const dataFmt = d+'/'+m+'/'+y;
-    const horario = s.startTime+'–'+s.endTime;
+    const diaHorario = dataFmt+', '+s.startTime+'–'+s.endTime;
     const su = signupsFor(s.id);
+    const pmLines = su.length
+      ? su.map(x=> ((RANK_ABBR[x.patente]||'')+' '+(x.nome||'')).trim())
+      : [''];
+    return { cidade: 'Guarapuava', diaHorario, vtrSetor: s.local||'', pmLines };
+  });
+}
+
+function exportEscalaXlsx(){
+  if(!window.XLSX){ showToast('Biblioteca de planilhas não carregou. Recarregue a página.'); return; }
+
+  const blocks = buildEscalaReportBlocks();
+  const rows = [];
+  const merges = [];
+
+  // Linha 0: título mesclado nas 4 colunas.
+  rows.push([ESCALA_REPORT_TITLE, '', '', '']);
+  merges.push({ s:{r:0,c:0}, e:{r:0,c:3} });
+
+  // Linha 1: cabeçalho da tabela.
+  rows.push(ESCALA_REPORT_HEADERS.slice());
+  const headerRow = 1;
+
+  blocks.forEach(b=>{
     const startRow = rows.length;
-
-    if(su.length === 0){
-      rows.push([dataFmt, dp.dow, horario, s.local||'', s.viatura||'', faseLabel(s.fase), '', '']);
-    } else {
-      su.forEach((x, i)=>{
-        // Só a primeira linha do bloco leva os dados da vaga — as demais
-        // ficam com essas colunas vazias, pois serão cobertas pela célula
-        // mesclada (!merges) logo abaixo.
-        rows.push(i===0
-          ? [dataFmt, dp.dow, horario, s.local||'', s.viatura||'', faseLabel(s.fase), x.nome, RANK_LABEL[x.patente]||x.patente||'']
-          : ['', '', '', '', '', '', x.nome, RANK_LABEL[x.patente]||x.patente||'']);
-      });
-    }
-
+    b.pmLines.forEach((line, i)=>{
+      rows.push(i===0 ? [b.cidade, b.diaHorario, b.vtrSetor, line] : ['', '', '', line]);
+    });
     const endRow = rows.length - 1;
-    vagaBlocks.push({ startRow, endRow });
-    if(su.length > 1){
-      MERGE_COLS.forEach(c=>{ merges.push({ s:{r:startRow,c}, e:{r:endRow,c} }); });
-    }
-
-    // Linha em branco entre uma vaga e a próxima, pra separar visualmente
-    // (ver nota sobre cor de fundo mais abaixo).
-    if(vagaIdx < upcoming.length - 1){
-      rows.push(['', '', '', '', '', '', '', '']);
+    // Cidade/Dia e Horário/VTR-Setor mesclados verticalmente quando a vaga
+    // tem mais de um voluntário — PMs ESCALADO fica uma linha por voluntário.
+    if(b.pmLines.length > 1){
+      [0,1,2].forEach(c=> merges.push({ s:{r:startRow,c}, e:{r:endRow,c} }));
     }
   });
+
+  rows.push(['', '', '', '']);
+  rows.push(['Assinado no Original', '', '', '']);
+  rows.push(['', '', '', '']);
+  rows.push(['___________________________', '', '', '']);
 
   const ws = window.XLSX.utils.aoa_to_sheet(rows);
-  // Largura de coluna aproximada (em "caracteres"), suportada na versão
-  // gratuita da SheetJS. Negrito no cabeçalho exigiria estilo de célula
-  // (propriedade .s), que não é suportado na build community/gratuita do
-  // XLSX usada aqui — por isso o cabeçalho fica só como texto normal mesmo.
   ws['!cols'] = [
-    { wch: 12 }, // Data
-    { wch: 14 }, // Dia da semana
-    { wch: 14 }, // Horário
-    { wch: 24 }, // Local
-    { wch: 10 }, // Viatura
-    { wch: 26 }, // Liberado para
-    { wch: 26 }, // Nome do voluntário
-    { wch: 12 }, // Patente
+    { wch: 16 }, // Cidade
+    { wch: 26 }, // Dia e Horário
+    { wch: 26 }, // VTR - Setor
+    { wch: 34 }, // PMs ESCALADO
   ];
-
-  // Mescla verticalmente Data/Dia da semana/Horário/Local/Viatura/Liberado
-  // para ao longo das linhas de voluntários de cada vaga com mais de um
-  // voluntário. Nome e Patente permanecem distintos por linha.
   ws['!merges'] = merges;
 
-  // Cabeçalho fixo ao rolar (freeze panes). Formato conforme a documentação
-  // da SheetJS; a build gratuita/community carregada aqui (xlsx.full.min.js)
-  // costuma IGNORAR essa propriedade silenciosamente ao gravar o .xlsx —
-  // congelar painel é normalmente um recurso restrito à versão Pro. Deixamos
-  // a tentativa mesmo assim (sem custo caso seja ignorada pela build atual).
-  ws['!freeze'] = { xSplit: 0, ySplit: 1, topLeftCell: 'A2', activePane: 'bottomLeft', state: 'frozen' };
-
-  // Autofiltro no intervalo completo da tabela — isso É suportado ao gravar
-  // na versão gratuita da SheetJS (não depende de estilo de célula).
-  const lastRow = rows.length - 1;
-  const lastCol = headers.length - 1;
-  ws['!autofilter'] = { ref: window.XLSX.utils.encode_range({ s:{r:0,c:0}, e:{r:lastRow,c:lastCol} }) };
-
-  // Cor de fundo alternada por vaga via estilo de célula (cell.s). Mesma
-  // ressalva do negrito/freeze: a versão gratuita da SheetJS não grava
-  // estilos de célula no .xlsx (recurso Pro), então isso tende a não
-  // aparecer nesta build — por isso a linha em branco entre vagas (acima) é
-  // o mecanismo que garante, de fato, a separação visual aqui.
-  vagaBlocks.forEach((block, idx)=>{
-    if(idx % 2 === 0) return; // pinta uma vaga sim, uma não
-    for(let r=block.startRow; r<=block.endRow; r++){
-      for(let c=0; c<headers.length; c++){
-        const addr = window.XLSX.utils.encode_cell({ r, c });
-        if(!ws[addr]) ws[addr] = { t:'s', v:'' };
-        ws[addr].s = { fill: { fgColor: { rgb:'F2F2F2' } }, border: {
-          top: { style:'thin', color:{ rgb:'CCCCCC' } }, bottom: { style:'thin', color:{ rgb:'CCCCCC' } },
-          left: { style:'thin', color:{ rgb:'CCCCCC' } }, right: { style:'thin', color:{ rgb:'CCCCCC' } }
-        } };
-      }
-    }
-  });
+  // Negrito/centralização exigem estilo de célula (propriedade .s), que a
+  // build community/gratuita do XLSX usada aqui (xlsx.full.min.js) costuma
+  // IGNORAR silenciosamente ao gravar o .xlsx (recurso restrito à versão
+  // Pro da SheetJS). Deixamos a tentativa mesmo assim, sem custo caso seja
+  // ignorada pela build atual.
+  const titleAddr = window.XLSX.utils.encode_cell({ r:0, c:0 });
+  if(ws[titleAddr]) ws[titleAddr].s = { font: { bold:true, sz:14 }, alignment: { horizontal:'center', vertical:'center' } };
+  for(let c=0; c<ESCALA_REPORT_HEADERS.length; c++){
+    const addr = window.XLSX.utils.encode_cell({ r:headerRow, c });
+    if(ws[addr]) ws[addr].s = { font: { bold:true } };
+  }
 
   const wb = window.XLSX.utils.book_new();
   window.XLSX.utils.book_append_sheet(wb, ws, 'Escala Extra');
 
+  const today = new Date();
   const todayStr = today.getFullYear()+'-'+String(today.getMonth()+1).padStart(2,'0')+'-'+String(today.getDate()).padStart(2,'0');
   window.XLSX.writeFile(wb, 'escala-extra-'+todayStr+'.xlsx');
+}
+
+// ---------- EXPORTAÇÃO DA ESCALA (DOCX) ----------
+
+function exportEscalaDocx(){
+  if(!window.docx){ showToast('Biblioteca de geração de Word não carregou. Verifique sua conexão e recarregue a página.'); return; }
+
+  const { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, VerticalMergeType, WidthType, AlignmentType } = window.docx;
+
+  const blocks = buildEscalaReportBlocks();
+
+  const headerCell = (text)=> new TableCell({
+    children: [new Paragraph({ children: [new TextRun({ text, bold:true })] })]
+  });
+
+  const bodyCell = (text, vmerge)=>{
+    const opts = { children: [new Paragraph(text||'')] };
+    if(vmerge) opts.verticalMerge = vmerge;
+    return new TableCell(opts);
+  };
+
+  const tableRows = [
+    new TableRow({ children: ESCALA_REPORT_HEADERS.map(headerCell) })
+  ];
+
+  blocks.forEach(b=>{
+    b.pmLines.forEach((line, i)=>{
+      const merge = b.pmLines.length > 1 ? (i===0 ? VerticalMergeType.RESTART : VerticalMergeType.CONTINUE) : undefined;
+      tableRows.push(new TableRow({ children: [
+        bodyCell(i===0 ? b.cidade : '', merge),
+        bodyCell(i===0 ? b.diaHorario : '', merge),
+        bodyCell(i===0 ? b.vtrSetor : '', merge),
+        bodyCell(line),
+      ] }));
+    });
+  });
+
+  const table = new Table({
+    width: { size: 100, type: WidthType.PERCENTAGE },
+    rows: tableRows,
+  });
+
+  const doc = new Document({
+    sections: [{
+      children: [
+        new Paragraph({
+          alignment: AlignmentType.CENTER,
+          children: [new TextRun({ text: ESCALA_REPORT_TITLE, bold:true, size:28 })],
+        }),
+        new Paragraph({ text: '' }),
+        table,
+        new Paragraph({ text: '' }),
+        new Paragraph({ text: '' }),
+        new Paragraph({ text: 'Assinado no Original' }),
+        new Paragraph({ text: '' }),
+        new Paragraph({ text: '___________________________' }),
+      ],
+    }],
+  });
+
+  const today = new Date();
+  const todayStr = today.getFullYear()+'-'+String(today.getMonth()+1).padStart(2,'0')+'-'+String(today.getDate()).padStart(2,'0');
+
+  Packer.toBlob(doc).then(blob=>{
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'escala-extra-'+todayStr+'.docx';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }).catch(e=>{
+    console.error('Erro ao gerar o Word:', e);
+    showToast('Erro ao gerar o arquivo Word.');
+  });
 }
 
 // ---------- IMPORTAÇÃO DE VAGAS EM LOTE (colar texto, uma vaga por linha) ----------
