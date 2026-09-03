@@ -40,6 +40,13 @@
   .card{background:var(--panel);border:1px solid var(--border);border-top:3px solid var(--green-inst);border-radius:var(--r-md);padding:16px;margin-bottom:14px;}
   .section-title{font-family:'Oswald',sans-serif;font-weight:700;text-transform:uppercase;letter-spacing:.04em;font-size:14px;color:var(--text);margin-bottom:10px;}
   .section-title.accent{color:var(--amber);}
+  .section-title.admin-toggle{cursor:pointer;user-select:none;display:flex;align-items:center;gap:8px;justify-content:space-between;}
+  .admin-toggle .admin-toggle-label{display:flex;align-items:center;gap:8px;}
+  .admin-caret{display:inline-block;width:10px;flex-shrink:0;color:var(--muted);}
+  .admin-section.open .admin-caret{color:var(--amber);}
+  .admin-section-collapse{display:grid;grid-template-rows:0fr;transition:grid-template-rows .25s ease;}
+  .admin-section.open .admin-section-collapse{grid-template-rows:1fr;}
+  .admin-section-collapse>div{overflow:hidden;min-height:0;}
   .shift-card{display:flex;gap:14px;}
   .shift-date{font-family:'Oswald',sans-serif;text-align:center;min-width:58px;background:var(--panel-2);border-radius:var(--r-sm);padding:8px 4px;height:fit-content;}
   .shift-date .dow{font-size:10px;letter-spacing:.08em;color:var(--muted);text-transform:uppercase;}
@@ -165,6 +172,12 @@ let adminUnlocked = false;
 let currentPin = null;
 let editingShiftId = null;
 let activeTab = 'vagas';
+// Estado (em memória, não persistido) de cada seção colapsável da Administração —
+// só existe enquanto o admin está navegando; sobrevive a re-renderizações (ex:
+// onSnapshot em tempo real) porque é uma variável de módulo, não algo recriado
+// a cada render(). Chave ausente = usa o default de ADMIN_SECTION_DEFAULT_OPEN
+// (ver isAdminSectionOpen), então nenhuma seção precisa ser inicializada aqui.
+let adminSectionsOpen = {};
 let periodosEscala = [];       // [{ id, vigenciaInicio:'YYYY-MM-DDTHH:mm', equipes:{A:[{funcao,patente,nome,cpf}], B:[...], C:[...], D:[...]} }, ...] — ordenado por vigenciaInicio; ver getEscalaVigente()
 let equipesImportFormOpen = false; // true enquanto o admin está importando um novo período de escala de equipes
 let calendarioOficial = null;  // { 'YYYY-MM-DD': { dia:'A', noite:'B' }, ... } — entradas EXPLÍCITAS (import/edição manual); dado único e independente dos períodos de escala
@@ -979,6 +992,38 @@ function faseQuickButtonsHtml(s){
 
 // ---------- ADMIN ----------
 
+// ---------- SEÇÕES COLAPSÁVEIS DA ADMINISTRAÇÃO ----------
+// Por padrão só "Nova vaga" e a listagem de vagas cadastradas começam
+// expandidas (são as mais usadas no dia a dia) — todas as outras seções
+// começam recolhidas, mostrando só o título.
+const ADMIN_SECTION_DEFAULT_OPEN = { novaVaga: true, vagasCadastradas: true };
+
+function isAdminSectionOpen(key){
+  if(Object.prototype.hasOwnProperty.call(adminSectionsOpen, key)) return adminSectionsOpen[key];
+  return !!ADMIN_SECTION_DEFAULT_OPEN[key];
+}
+
+function toggleAdminSection(key){
+  adminSectionsOpen[key] = !isAdminSectionOpen(key);
+  render();
+}
+
+// Monta um <div class="card"> com cabeçalho clicável (título + seta ▸/▾) que
+// alterna adminSectionsOpen[key] via toggleAdminSection, envolvendo o
+// conteúdo (innerHtml) num contêiner que anima altura via CSS Grid
+// (grid-template-rows 0fr↔1fr, ver .admin-section-collapse) — sem precisar
+// medir altura em JS. Não altera nada da lógica/dados da seção, só onde o
+// HTML já pronto de cada uma é exibido.
+function renderAdminSection(key, titleHtml, innerHtml){
+  const open = isAdminSectionOpen(key);
+  return '<div class="card admin-section'+(open?' open':'')+'">'
+    + '<div class="section-title admin-toggle" onclick="toggleAdminSection(\''+key+'\')">'
+    + '<span class="admin-toggle-label"><span class="admin-caret">'+(open?'▾':'▸')+'</span>'+titleHtml+'</span>'
+    + '</div>'
+    + '<div class="admin-section-collapse"><div>'+innerHtml+'</div></div>'
+    + '</div>';
+}
+
 function renderAdmin(){
   const el = document.getElementById('view-admin');
   if(!adminUnlocked){
@@ -1013,38 +1058,35 @@ function renderAdmin(){
     + '</div>';
 
   const hasCalendario = !!(calendarioOficial && Object.keys(calendarioOficial).length > 0);
+  let sectionHtml; // reaproveitado pra montar o conteúdo interno de cada seção colapsável antes de embrulhar com renderAdminSection
 
-  // --- Card 1: Escala de Equipes, por período de vigência ---
-  html += '<div class="card">'
-    + '<div class="section-title">Escala de Equipes (por período de vigência)</div>';
-
+  // --- Escala de Equipes, por período de vigência ---
+  sectionHtml = '';
   if(periodosEscala.length > 0){
-    html += '<div class="table-wrap"><table class="roster"><thead><tr><th>Período</th><th>Total policiais</th><th></th></tr></thead><tbody>';
+    sectionHtml += '<div class="table-wrap"><table class="roster"><thead><tr><th>Período</th><th>Total policiais</th><th></th></tr></thead><tbody>';
     periodosEscala.forEach(p=>{
       const total = TEAM_LETTERS.map(l=>(p.equipes[l]||[]).length).reduce((a,b)=>a+b,0);
-      html += '<tr><td>'+escapeHtml(fmtVigenciaLabel(p.vigenciaInicio))+'</td><td>'+total+' policial(is)</td>'
+      sectionHtml += '<tr><td>'+escapeHtml(fmtVigenciaLabel(p.vigenciaInicio))+'</td><td>'+total+' policial(is)</td>'
         + '<td style="white-space:nowrap;"><button class="btn btn-ghost btn-sm" onclick="editPeriodo(\''+p.id+'\')">Editar</button> '
         + '<button class="btn btn-danger btn-sm" onclick="deletePeriodo(\''+p.id+'\')">Remover</button></td></tr>';
     });
-    html += '</tbody></table></div>';
+    sectionHtml += '</tbody></table></div>';
   } else {
-    html += '<div class="muted-sm" style="margin-bottom:10px;">Nenhuma escala de equipes importada ainda — o cruzamento de conflitos fica desativado até a importação de ao menos um período.</div>';
+    sectionHtml += '<div class="muted-sm" style="margin-bottom:10px;">Nenhuma escala de equipes importada ainda — o cruzamento de conflitos fica desativado até a importação de ao menos um período.</div>';
   }
 
   if(equipesImportFormOpen){
-    html += '<div class="field" style="margin-top:12px;"><label>Escala de equipes (PDF, DOCX, XLSX, ODS ou CSV)</label><input type="file" id="imp-equipes" accept=".pdf,.docx,.xlsx,.ods,.csv"></div>'
+    sectionHtml += '<div class="field" style="margin-top:12px;"><label>Escala de equipes (PDF, DOCX, XLSX, ODS ou CSV)</label><input type="file" id="imp-equipes" accept=".pdf,.docx,.xlsx,.ods,.csv"></div>'
       + '<div class="field"><label>Vigente a partir de</label><input type="datetime-local" id="imp-vigencia"></div>'
       + '<button class="btn btn-primary btn-block" id="imp-equipes-process">Processar arquivo</button>'
       + '<button class="link-btn" style="margin-top:8px;" id="imp-equipes-cancel">Cancelar</button>';
   } else {
-    html += '<button class="btn btn-ghost btn-sm" style="margin-top:10px;" id="imp-equipes-open-btn">Importar novo período de escala de equipes</button>';
+    sectionHtml += '<button class="btn btn-ghost btn-sm" style="margin-top:10px;" id="imp-equipes-open-btn">Importar novo período de escala de equipes</button>';
   }
-  html += '</div>';
+  html += renderAdminSection('equipes', 'Escala de Equipes (por período de vigência)', sectionHtml);
 
-  // --- Card 2: Calendário de Rodízio (Dia/Noite) — dado único, independente dos períodos acima ---
-  html += '<div class="card">'
-    + '<div class="section-title">Calendário de Rodízio (Dia / Noite)</div>';
-
+  // --- Calendário de Rodízio (Dia/Noite) — dado único, independente dos períodos acima ---
+  sectionHtml = '';
   if(hasCalendario && !calendarImportFormOpen){
     const dias = Object.keys(calendarioOficial).sort();
     let periodoLabel = '';
@@ -1058,31 +1100,29 @@ function renderAdmin(){
         periodoLabel = ' ('+dias[0]+' a '+dias[dias.length-1]+')';
       }
     }
-    html += '<div class="muted-sm" style="margin-bottom:6px;">Calendário: '+dias.length+' dia(s) mapeado(s)'+periodoLabel+'.</div>'
+    sectionHtml += '<div class="muted-sm" style="margin-bottom:6px;">Calendário: '+dias.length+' dia(s) mapeado(s)'+periodoLabel+'.</div>'
       + '<div class="muted-sm" style="margin-bottom:10px;'+(cicloEscala?'color:var(--green);':'color:var(--amber);')+'">'+escapeHtml(formatCicloLabel(cicloEscala))+'</div>'
       + '<div style="display:flex;gap:8px;flex-wrap:wrap;">'
       + '<button class="btn btn-ghost btn-sm" id="cal-replace-btn">Substituir calendário</button>'
       + '<button class="btn btn-ghost btn-sm" id="cal-manual-edit-btn">Editar manualmente</button>'
       + '</div>';
   } else {
-    html += '<div class="muted-sm" style="margin-bottom:10px;">Envie o calendário mensal (define quais equipes estão de Dia/Noite em cada data) para cruzar com os voluntariados extras e evitar que alguém se voluntarie enquanto já está de serviço normal.</div>'
+    sectionHtml += '<div class="muted-sm" style="margin-bottom:10px;">Envie o calendário mensal (define quais equipes estão de Dia/Noite em cada data) para cruzar com os voluntariados extras e evitar que alguém se voluntarie enquanto já está de serviço normal.</div>'
       + '<div class="field"><label>Calendário mensal (DOCX, XLSX, ODS ou CSV)</label><input type="file" id="imp-calendario" accept=".docx,.xlsx,.ods,.csv"></div>'
       + '<button class="btn btn-primary btn-block" id="imp-calendario-process">Processar arquivo</button>'
       + (hasCalendario ? '<button class="link-btn" style="margin-top:8px;" id="imp-calendario-cancel">Cancelar</button>' : '');
   }
-  html += '</div>';
+  html += renderAdminSection('calendario', 'Calendário de Rodízio (Dia / Noite)', sectionHtml);
 
   // --- Card: Policiais Externos — cadastro à parte (fora dos períodos de
   // periodosEscala), usado só pra travar a patente no voluntariado; nunca
   // entra em findEscalaConflict/findRestConflict (ver findRankByCpfInEscalaOficial).
-  html += '<div class="card">'
-    + '<div class="section-title">Policiais Externos</div>'
-    + '<div class="muted-sm" style="margin-bottom:10px;">Policiais de outras unidades que fazem extra aqui mas não têm escala normal no batalhão. Usado só pra confirmar a patente automaticamente no voluntariado — não entra na checagem de conflito de escala/descanso.</div>';
+  sectionHtml = '<div class="muted-sm" style="margin-bottom:10px;">Policiais de outras unidades que fazem extra aqui mas não têm escala normal no batalhão. Usado só pra confirmar a patente automaticamente no voluntariado — não entra na checagem de conflito de escala/descanso.</div>';
 
   if(policiaisExternos.length > 0){
-    html += '<div class="table-wrap"><table class="roster"><thead><tr><th>Nome</th><th>Patente</th><th>CPF</th><th></th></tr></thead><tbody>';
+    sectionHtml += '<div class="table-wrap"><table class="roster"><thead><tr><th>Nome</th><th>Patente</th><th>CPF</th><th></th></tr></thead><tbody>';
     policiaisExternos.forEach(p=>{
-      html += '<tr>'
+      sectionHtml += '<tr>'
         + '<td><input value="'+escapeHtml(p.nome||'')+'" onchange="editPoliciaExternoNome(\''+p.id+'\', this.value)"></td>'
         + '<td><select onchange="editPoliciaExternoPatente(\''+p.id+'\', this.value)">'
           + RANK_ORDER.map(r=>'<option value="'+r+'" '+(r===p.patente?'selected':'')+'>'+RANK_LABEL[r]+'</option>').join('')
@@ -1091,35 +1131,33 @@ function renderAdmin(){
         + '<td><button class="link-btn" style="color:var(--red);" onclick="removePoliciaExterno(\''+p.id+'\')">remover</button></td>'
         + '</tr>';
     });
-    html += '</tbody></table></div>';
+    sectionHtml += '</tbody></table></div>';
   } else {
-    html += '<div class="muted-sm" style="margin-bottom:10px;">Nenhum policial externo cadastrado ainda.</div>';
+    sectionHtml += '<div class="muted-sm" style="margin-bottom:10px;">Nenhum policial externo cadastrado ainda.</div>';
   }
-  html += '<button class="btn btn-ghost btn-sm" style="margin-top:10px;" id="add-externo-btn">Adicionar policial externo</button>';
-  html += '</div>';
+  sectionHtml += '<button class="btn btn-ghost btn-sm" style="margin-top:10px;" id="add-externo-btn">Adicionar policial externo</button>';
+  html += renderAdminSection('externos', 'Policiais Externos', sectionHtml);
 
-  html += '<div class="card">'
-    + '<div class="section-title">Nova vaga</div>'
-    + '<form id="nf-form">'
+  sectionHtml = '<form id="nf-form">'
     + '<div class="row2"><div class="field"><label>Data</label><input type="date" id="nf-date"></div><div class="field"><label>Vagas</label><input type="number" id="nf-vagas" min="1" value="1"></div></div>'
     + '<div class="row2"><div class="field"><label>Início</label><input type="time" id="nf-start"></div><div class="field"><label>Término</label><input type="time" id="nf-end"></div></div>'
     + '<div class="row2"><div class="field"><label>Local (opcional)</label><input id="nf-local" list="datalist-locais" placeholder="Ex: Batalhão / Evento"></div><div class="field"><label>Viatura (opcional)</label><input id="nf-viatura" list="datalist-viaturas" placeholder="Ex: 1234"></div></div>'
     + '<div class="field"><label>Liberar inicialmente para</label><select id="nf-fase">'+faseSelectOptions('sgt')+'</select></div>'
     + '<button type="submit" class="btn btn-primary btn-block" id="nf-add">Adicionar vaga</button>'
     + '</form>'
-    + '<button class="btn btn-ghost btn-sm" style="margin-top:10px;" id="lote-open-btn">Importar vagas em lote</button>'
-    + '</div>';
+    + '<button class="btn btn-ghost btn-sm" style="margin-top:10px;" id="lote-open-btn">Importar vagas em lote</button>';
+  html += renderAdminSection('novaVaga', 'Nova vaga', sectionHtml);
 
-  html += '<div class="refresh-row"><span class="muted-sm">'+shifts.length+' vaga(s) cadastradas</span><button class="link-btn" onclick="refreshAll()">Atualizar</button></div>';
+  sectionHtml = '<div class="refresh-row"><span class="muted-sm">'+shifts.length+' vaga(s) cadastradas</span><button class="link-btn" onclick="event.stopPropagation(); refreshAll()">Atualizar</button></div>';
 
   if(shifts.length === 0){
-    html += '<div class="card empty">Nenhuma vaga cadastrada ainda.</div>';
+    sectionHtml += '<div class="card empty">Nenhuma vaga cadastrada ainda.</div>';
   } else {
     for(const s of shifts){
       const su = signupsFor(s.id);
       const dp = fmtDateParts(s.date);
       if(editingShiftId === s.id){
-        html += '<div class="card">'
+        sectionHtml += '<div class="card">'
           + '<div class="section-title accent" style="font-size:13px;">Editando vaga</div>'
           + '<form id="ef-form">'
           + '<div class="row2"><div class="field"><label>Data</label><input type="date" id="ef-date" value="'+s.date+'"></div><div class="field"><label>Vagas</label><input type="number" id="ef-vagas" min="1" value="'+s.vagas+'"></div></div>'
@@ -1130,7 +1168,7 @@ function renderAdmin(){
           + '</form>'
           + '</div>';
       } else {
-        html += '<div class="card" style="border-top-color:'+faseBorderColor(s.fase)+';">'
+        sectionHtml += '<div class="card" style="border-top-color:'+faseBorderColor(s.fase)+';">'
           + '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;flex-wrap:wrap;">'
           + '<div><div class="shift-time">'+dp.dnum+'/'+dp.mon+' &middot; '+s.startTime+'–'+s.endTime+'</div>'
           + (metaLine(s) ? '<div class="shift-local">'+metaLine(s)+'</div>' : '')
@@ -1145,6 +1183,7 @@ function renderAdmin(){
       }
     }
   }
+  html += renderAdminSection('vagasCadastradas', 'Vagas Cadastradas', sectionHtml);
 
   // Roster table of all volunteers
   const allSignups = signups.slice().sort((a,b)=>{
@@ -1152,16 +1191,16 @@ function renderAdmin(){
     if(!sa || !sb) return 0;
     return (sa.date+sa.startTime).localeCompare(sb.date+sb.startTime);
   });
-  html += '<div class="card"><div class="section-title">Tabela de voluntários</div>';
+  sectionHtml = '';
   if(allSignups.length === 0){
-    html += '<div class="muted-sm">Ninguém se voluntariou ainda.</div>';
+    sectionHtml += '<div class="muted-sm">Ninguém se voluntariou ainda.</div>';
   } else {
-    html += '<div class="table-wrap"><table class="roster"><thead><tr><th>Data/Horário</th><th>Nome</th><th>Patente</th><th>Viatura</th><th></th></tr></thead><tbody>';
+    sectionHtml += '<div class="table-wrap"><table class="roster"><thead><tr><th>Data/Horário</th><th>Nome</th><th>Patente</th><th>Viatura</th><th></th></tr></thead><tbody>';
     for(const su of allSignups){
       const s = shifts.find(x=>x.id===su.shiftId);
       if(!s) continue;
       const dp = fmtDateParts(s.date);
-      html += '<tr>'
+      sectionHtml += '<tr>'
         + '<td>'+dp.dnum+'/'+dp.mon+' '+s.startTime+'</td>'
         + '<td><input value="'+escapeHtml(su.nome)+'" onchange="editSignupName(\''+su.id+'\', this.value)"></td>'
         + '<td><select onchange="editSignupPatente(\''+su.id+'\', this.value)">'
@@ -1171,27 +1210,27 @@ function renderAdmin(){
         + '<td><button class="link-btn" style="color:var(--red);" onclick="removeSignup(\''+su.id+'\')">remover</button></td>'
         + '</tr>';
     }
-    html += '</tbody></table></div>';
+    sectionHtml += '</tbody></table></div>';
   }
-  html += '</div>';
+  html += renderAdminSection('voluntarios', 'Tabela de voluntários', sectionHtml);
 
   // --- Lixeira / Ações Recentes — só na Administração (protegida por PIN),
   // nunca aparece na tela pública (renderVagas nem sequer lê 'lixeira').
-  html += '<div class="card"><div class="section-title">Lixeira / Ações Recentes</div>';
+  sectionHtml = '';
   if(lixeira.length === 0){
-    html += '<div class="muted-sm">Nenhuma ação destrutiva registrada ainda.</div>';
+    sectionHtml += '<div class="muted-sm">Nenhuma ação destrutiva registrada ainda.</div>';
   } else {
-    html += '<div class="muted-sm" style="margin-bottom:10px;">Cópia de segurança automática das últimas '+LIXEIRA_MAX+' ações de "Apagar tudo" / "Excluir vaga". Restaurar acrescenta os dados de volta sem apagar nada criado depois.</div>';
-    html += '<div class="table-wrap"><table class="roster"><thead><tr><th>Quando</th><th>Ação</th><th>Resumo</th><th></th></tr></thead><tbody>';
+    sectionHtml += '<div class="muted-sm" style="margin-bottom:10px;">Cópia de segurança automática das últimas '+LIXEIRA_MAX+' ações de "Apagar tudo" / "Excluir vaga". Restaurar acrescenta os dados de volta sem apagar nada criado depois.</div>';
+    sectionHtml += '<div class="table-wrap"><table class="roster"><thead><tr><th>Quando</th><th>Ação</th><th>Resumo</th><th></th></tr></thead><tbody>';
     lixeira.forEach(entry=>{
-      html += '<tr><td>'+fmtLixeiraTimestamp(entry.timestamp)+'</td>'
+      sectionHtml += '<tr><td>'+fmtLixeiraTimestamp(entry.timestamp)+'</td>'
         + '<td>'+escapeHtml(LIXEIRA_TIPO_LABEL[entry.tipo] || entry.tipo)+'</td>'
         + '<td>'+escapeHtml(lixeiraResumo(entry))+'</td>'
         + '<td><button class="btn btn-ghost btn-sm" onclick="restaurarLixeira(\''+entry.id+'\')">Restaurar</button></td></tr>';
     });
-    html += '</tbody></table></div>';
+    sectionHtml += '</tbody></table></div>';
   }
-  html += '</div>';
+  html += renderAdminSection('lixeira', 'Lixeira / Ações Recentes', sectionHtml);
 
   html += '<div class="modal-actions"><button class="btn btn-ghost" id="change-pin-btn">Trocar PIN</button><button class="btn btn-ghost" id="lock-btn">Sair da administração</button></div>';
 
@@ -2463,6 +2502,7 @@ window.editPoliciaExternoPatente = editPoliciaExternoPatente;
 window.editPoliciaExternoCpf = editPoliciaExternoCpf;
 window.removePoliciaExterno = removePoliciaExterno;
 window.maskCpf = maskCpf; // usado inline (oninput) na máscara ao vivo do CPF na tabela de Policiais Externos
+window.toggleAdminSection = toggleAdminSection;
 
 render();
 
