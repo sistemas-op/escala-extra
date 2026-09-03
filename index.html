@@ -171,6 +171,7 @@ let calendarioOficial = null;  // { 'YYYY-MM-DD': { dia:'A', noite:'B' }, ... } 
 let cicloEscala = null;        // { dataAncora:'YYYY-MM-DD', periodoDias:P, padrao:[{dia,noite}, ...] } ou null — ver detectCiclo()
 let calendarImportFormOpen = false; // true enquanto o admin está substituindo o calendário mensal já importado
 let lixeira = [];              // [{ id, timestamp:ISO, tipo:'apagar_tudo'|'excluir_vaga', dadosOriginais:{shifts:[...], signups:[...]} }, ...] — mais recente primeiro; ver addLixeiraEntry()
+let policiaisExternos = [];    // [{ id, nome, patente:'sgt'|'cabo'|'soldado', cpf }] — policiais de outras unidades sem escala normal aqui; usado só pra confirmar patente no voluntariado (findRankByCpfInEscalaOficial), nunca em findEscalaConflict/findRestConflict
 const LIXEIRA_MAX = 20;        // entradas mais antigas além desse limite são descartadas ao adicionar uma nova
 
 const RANK_ORDER = ['sgt','cabo','soldado'];
@@ -277,6 +278,7 @@ function applyRemoteData(data){
   calendarioOficial = data.calendarioOficial || null;
   cicloEscala = data.cicloEscala || null;
   lixeira = Array.isArray(data.lixeira) ? data.lixeira : [];
+  policiaisExternos = Array.isArray(data.policiaisExternos) ? data.policiaisExternos.map(x=>({...x})) : [];
 }
 
 // Compatibilidade com dados antigos: documentos gravados antes da introdução
@@ -414,6 +416,12 @@ function persistPeriodosEscala(list){
   updateDoc(docRef, { periodosEscala: list }).catch(handlePersistError);
 }
 
+// Mesmo padrão de persistPeriodosEscala: array pequeno, gerido só pela
+// Administração — grava por inteiro a cada alteração.
+function persistPoliciaisExternos(list){
+  updateDoc(docRef, { policiaisExternos: list }).catch(handlePersistError);
+}
+
 // Grava o calendário mensal + ciclo detectado, substituindo os campos por
 // inteiro. Usa updateDoc (não setDoc com merge:true) de propósito: setDoc
 // com merge:true faz merge PROFUNDO de campos que são mapas — calendarioOficial
@@ -522,26 +530,39 @@ function findMembroByCpfInPeriodo(periodo, cpfDigits){
   return null;
 }
 
-// Busca a patente real (sgt/cabo/soldado) de um CPF na escala oficial
-// importada, pra travar o campo de patente no voluntariado e impedir que
-// alguém se cadastre com patente falsa pra burlar a liberação por fase.
-// Prioriza o período vigente na data/hora atual; se o CPF não aparecer nele
-// (ex: pessoa só cadastrada num período anterior/futuro), cai pros demais
-// períodos como fallback. Retorna null se o CPF não for encontrado em nenhum
-// período, ou se for encontrado mas a patente não bater com nenhuma das 3
-// categorias conhecidas (ex: oficiais).
+// Busca a patente real (sgt/cabo/soldado) de um CPF pra travar o campo de
+// patente no voluntariado e impedir que alguém se cadastre com patente falsa
+// pra burlar a liberação por fase. Ordem de busca:
+//   1. Período de periodosEscala vigente na data/hora atual;
+//   2. Demais períodos de periodosEscala, como fallback;
+//   3. policiaisExternos — cadastro à parte de policiais de outras unidades
+//      sem escala normal aqui (ver seção "Policiais Externos" na
+//      Administração). Usado só pra esta confirmação de patente:
+//      NUNCA entra em findEscalaConflict/findRestConflict, já que esses
+//      policiais não têm turno fixo no batalhão.
+// Retorna null se o CPF não for encontrado em lugar nenhum, ou se for
+// encontrado em periodosEscala mas a patente (texto livre importado) não
+// bater com nenhuma das 3 categorias conhecidas (ex: oficiais).
 function findRankByCpfInEscalaOficial(cpfDigits){
-  if(cpfDigits.length !== 11 || !periodosEscala.length) return null;
+  if(cpfDigits.length !== 11) return null;
 
-  const vigente = getEscalaVigente(nowLocalDateTimeISO());
-  const membroVigente = findMembroByCpfInPeriodo(vigente, cpfDigits);
-  if(membroVigente) return inferRankFromPatenteTexto(membroVigente.patente);
+  if(periodosEscala.length){
+    const vigente = getEscalaVigente(nowLocalDateTimeISO());
+    const membroVigente = findMembroByCpfInPeriodo(vigente, cpfDigits);
+    if(membroVigente) return inferRankFromPatenteTexto(membroVigente.patente);
 
-  for(const p of periodosEscala){
-    if(p === vigente) continue;
-    const membro = findMembroByCpfInPeriodo(p, cpfDigits);
-    if(membro) return inferRankFromPatenteTexto(membro.patente);
+    for(const p of periodosEscala){
+      if(p === vigente) continue;
+      const membro = findMembroByCpfInPeriodo(p, cpfDigits);
+      if(membro) return inferRankFromPatenteTexto(membro.patente);
+    }
   }
+
+  // policiaisExternos já guarda a patente normalizada (sgt/cabo/soldado),
+  // escolhida num <select> fechado — sem precisar de inferRankFromPatenteTexto.
+  const externo = policiaisExternos.find(x=> cpfMatchesMasked(cpfDigits, x.cpf));
+  if(externo && RANK_ORDER.includes(externo.patente)) return externo.patente;
+
   return null;
 }
 
@@ -1051,6 +1072,32 @@ function renderAdmin(){
   }
   html += '</div>';
 
+  // --- Card: Policiais Externos — cadastro à parte (fora dos períodos de
+  // periodosEscala), usado só pra travar a patente no voluntariado; nunca
+  // entra em findEscalaConflict/findRestConflict (ver findRankByCpfInEscalaOficial).
+  html += '<div class="card">'
+    + '<div class="section-title">Policiais Externos</div>'
+    + '<div class="muted-sm" style="margin-bottom:10px;">Policiais de outras unidades que fazem extra aqui mas não têm escala normal no batalhão. Usado só pra confirmar a patente automaticamente no voluntariado — não entra na checagem de conflito de escala/descanso.</div>';
+
+  if(policiaisExternos.length > 0){
+    html += '<div class="table-wrap"><table class="roster"><thead><tr><th>Nome</th><th>Patente</th><th>CPF</th><th></th></tr></thead><tbody>';
+    policiaisExternos.forEach(p=>{
+      html += '<tr>'
+        + '<td><input value="'+escapeHtml(p.nome||'')+'" onchange="editPoliciaExternoNome(\''+p.id+'\', this.value)"></td>'
+        + '<td><select onchange="editPoliciaExternoPatente(\''+p.id+'\', this.value)">'
+          + RANK_ORDER.map(r=>'<option value="'+r+'" '+(r===p.patente?'selected':'')+'>'+RANK_LABEL[r]+'</option>').join('')
+          + '</select></td>'
+        + '<td><input value="'+escapeHtml(p.cpf||'')+'" maxlength="14" inputmode="numeric" placeholder="000.000.000-00" oninput="this.value=maskCpf(this.value)" onchange="editPoliciaExternoCpf(\''+p.id+'\', this.value)"></td>'
+        + '<td><button class="link-btn" style="color:var(--red);" onclick="removePoliciaExterno(\''+p.id+'\')">remover</button></td>'
+        + '</tr>';
+    });
+    html += '</tbody></table></div>';
+  } else {
+    html += '<div class="muted-sm" style="margin-bottom:10px;">Nenhum policial externo cadastrado ainda.</div>';
+  }
+  html += '<button class="btn btn-ghost btn-sm" style="margin-top:10px;" id="add-externo-btn">Adicionar policial externo</button>';
+  html += '</div>';
+
   html += '<div class="card">'
     + '<div class="section-title">Nova vaga</div>'
     + '<form id="nf-form">'
@@ -1158,6 +1205,8 @@ function renderAdmin(){
   if(exportDocxBtn){ exportDocxBtn.onclick = exportEscalaDocx; }
   const clearBtn = el.querySelector('#clear-btn');
   if(clearBtn){ clearBtn.onclick = clearAllData; }
+  const addExternoBtn = el.querySelector('#add-externo-btn');
+  if(addExternoBtn){ addExternoBtn.onclick = addPoliciaExterno; }
   const impEquipesOpenBtn = el.querySelector('#imp-equipes-open-btn');
   if(impEquipesOpenBtn){ impEquipesOpenBtn.onclick = ()=>{ equipesImportFormOpen = true; render(); }; }
   const impEquipesCancelBtn = el.querySelector('#imp-equipes-cancel');
@@ -1962,6 +2011,48 @@ function editSignupPatente(id, newPatente){
   persistSignupUpsert(su);
 }
 
+// ---------- CADASTRO DE POLICIAIS EXTERNOS (só pra confirmação de patente) ----------
+
+function addPoliciaExterno(){
+  policiaisExternos.push({ id: uid(), nome:'', patente:'soldado', cpf:'' });
+  render();
+  persistPoliciaisExternos(policiaisExternos);
+}
+
+function editPoliciaExternoNome(id, newNome){
+  const p = policiaisExternos.find(x=>x.id===id);
+  if(!p) return;
+  p.nome = newNome.trim();
+  showToast('Nome atualizado');
+  render();
+  persistPoliciaisExternos(policiaisExternos);
+}
+
+function editPoliciaExternoPatente(id, newPatente){
+  const p = policiaisExternos.find(x=>x.id===id);
+  if(!p) return;
+  p.patente = newPatente;
+  showToast('Patente atualizada');
+  render();
+  persistPoliciaisExternos(policiaisExternos);
+}
+
+function editPoliciaExternoCpf(id, newCpf){
+  const p = policiaisExternos.find(x=>x.id===id);
+  if(!p) return;
+  p.cpf = maskCpf(newCpf);
+  showToast('CPF atualizado');
+  render();
+  persistPoliciaisExternos(policiaisExternos);
+}
+
+function removePoliciaExterno(id){
+  policiaisExternos = policiaisExternos.filter(x=>x.id!==id);
+  showToast('Policial externo removido');
+  render();
+  persistPoliciaisExternos(policiaisExternos);
+}
+
 // ---------- EXPORTAÇÃO DA ESCALA (modelo oficial — XLSX e DOCX) ----------
 
 const ESCALA_REPORT_TITLE = 'ESCALA EXTRAJORNADA VOLUNTÁRIA – 1ª CIA/16º BPM';
@@ -2367,6 +2458,11 @@ window.removeImportCalendarDate = removeImportCalendarDate;
 window.editPeriodo = editPeriodo;
 window.deletePeriodo = deletePeriodo;
 window.restaurarLixeira = restaurarLixeira;
+window.editPoliciaExternoNome = editPoliciaExternoNome;
+window.editPoliciaExternoPatente = editPoliciaExternoPatente;
+window.editPoliciaExternoCpf = editPoliciaExternoCpf;
+window.removePoliciaExterno = removePoliciaExterno;
+window.maskCpf = maskCpf; // usado inline (oninput) na máscara ao vivo do CPF na tabela de Policiais Externos
 
 render();
 
