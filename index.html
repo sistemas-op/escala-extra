@@ -485,6 +485,66 @@ function cpfMatchesMasked(inputDigits, storedCpfRaw){
   return true;
 }
 
+// Deduz a categoria de patente (mesmo domínio de RANK_ORDER: sgt/cabo/soldado)
+// a partir do texto livre de patente vindo da escala oficial importada (ex:
+// "3º Sgt", "Cb", "Sd", "Sargento") — usado só pra travar o campo de patente
+// no voluntariado (ver findRankByCpfInEscalaOficial). Retorna null quando o
+// texto não bate com nenhuma das 3 categorias conhecidas pelo app (ex: um
+// oficial, ou patente vazia/não reconhecida).
+function inferRankFromPatenteTexto(patenteRaw){
+  const t = (patenteRaw||'').normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase();
+  if(/\bsgt\b|sargento/.test(t)) return 'sgt';
+  if(/\bcb\b|cabo/.test(t)) return 'cabo';
+  if(/\bsd\b|soldado/.test(t)) return 'soldado';
+  return null;
+}
+
+// Instante atual no mesmo formato local 'YYYY-MM-DDTHH:mm' usado por
+// vigenciaInicio (valor de <input type="datetime-local">), pra poder comparar
+// direto em getEscalaVigente(). Não usa Date#toISOString() de propósito — ela
+// converte pra UTC e pode voltar/avançar a data em fusos atrás de UTC (ex:
+// Brasil, UTC-3), mesmo cuidado já tomado em fmtDateParts/shiftDateStr.
+function nowLocalDateTimeISO(){
+  const d = new Date();
+  const pad = n=> String(n).padStart(2,'0');
+  return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate())+'T'+pad(d.getHours())+':'+pad(d.getMinutes());
+}
+
+// Procura um CPF (11 dígitos) entre os policiais de um período de
+// periodosEscala (todas as equipes A-D), reaproveitando cpfMatchesMasked.
+function findMembroByCpfInPeriodo(periodo, cpfDigits){
+  if(!periodo) return null;
+  for(const letra of TEAM_LETTERS){
+    const membros = periodo.equipes[letra] || [];
+    const found = membros.find(m=> cpfMatchesMasked(cpfDigits, m.cpf));
+    if(found) return found;
+  }
+  return null;
+}
+
+// Busca a patente real (sgt/cabo/soldado) de um CPF na escala oficial
+// importada, pra travar o campo de patente no voluntariado e impedir que
+// alguém se cadastre com patente falsa pra burlar a liberação por fase.
+// Prioriza o período vigente na data/hora atual; se o CPF não aparecer nele
+// (ex: pessoa só cadastrada num período anterior/futuro), cai pros demais
+// períodos como fallback. Retorna null se o CPF não for encontrado em nenhum
+// período, ou se for encontrado mas a patente não bater com nenhuma das 3
+// categorias conhecidas (ex: oficiais).
+function findRankByCpfInEscalaOficial(cpfDigits){
+  if(cpfDigits.length !== 11 || !periodosEscala.length) return null;
+
+  const vigente = getEscalaVigente(nowLocalDateTimeISO());
+  const membroVigente = findMembroByCpfInPeriodo(vigente, cpfDigits);
+  if(membroVigente) return inferRankFromPatenteTexto(membroVigente.patente);
+
+  for(const p of periodosEscala){
+    if(p === vigente) continue;
+    const membro = findMembroByCpfInPeriodo(p, cpfDigits);
+    if(membro) return inferRankFromPatenteTexto(membro.patente);
+  }
+  return null;
+}
+
 // Policiais cuja função contém "suplementar" (ex: "RPA Suplementar") têm
 // horário variável, decidido à parte — não seguem o turno fixo Dia (06-18) /
 // Noite (18-06) do calendário de rodízio, então são ignorados apenas na
@@ -742,7 +802,7 @@ function openSignupModal(shiftId){
     + '<div class="badge phase" style="margin-bottom:14px;">'+faseLabel(s.fase)+'</div>'
     + '<form id="su-form">'
     + '<div class="field"><label>Nome completo</label><input id="su-nome" list="datalist-nomes" placeholder="Ex: Sd Eduardo Silva"></div>'
-    + '<div class="field"><label>Patente</label><select id="su-patente">'+rankOptions(allowed)+'</select></div>'
+    + '<div class="field"><label>Patente</label><select id="su-patente">'+rankOptions(allowed)+'</select><div id="su-patente-note" class="muted-sm" style="margin-top:4px;display:none;"></div></div>'
     + '<div class="field"><label>CPF</label><input id="su-cpf" placeholder="000.000.000-00" maxlength="14" inputmode="numeric"></div>'
     + '<div class="modal-actions"><button type="button" class="btn btn-ghost" id="su-cancel">Cancelar</button><button type="submit" class="btn btn-primary" id="su-confirm">Confirmar</button></div>'
     + '</form>'
@@ -751,7 +811,37 @@ function openSignupModal(shiftId){
   const nomeInput = bg.querySelector('#su-nome');
   if(isDesktopViewport()) nomeInput.focus();
   const cpfInput = bg.querySelector('#su-cpf');
-  cpfInput.oninput = ()=>{ cpfInput.value = maskCpf(cpfInput.value); };
+  const patenteSelectEl = bg.querySelector('#su-patente');
+  const patenteNoteEl = bg.querySelector('#su-patente-note');
+
+  // Reavalia o campo de patente a cada mudança no CPF (input/blur): com CPF
+  // completo (11 dígitos) e encontrado na escala oficial, trava o campo na
+  // patente real cadastrada (anti-fraude); caso contrário, mantém o campo
+  // livre para edição manual. Roda do zero a cada abertura do modal, já que
+  // o <select> é recriado sem estado travado.
+  function reevaluatePatenteFromCpf(){
+    const digits = cpfInput.value.replace(/\D/g,'');
+    if(digits.length !== 11){
+      patenteSelectEl.disabled = false;
+      patenteNoteEl.style.display = 'none';
+      return;
+    }
+    const rank = findRankByCpfInEscalaOficial(digits);
+    if(rank){
+      patenteSelectEl.value = rank;
+      patenteSelectEl.disabled = true;
+      patenteNoteEl.textContent = 'Patente confirmada automaticamente pelo cadastro oficial.';
+      patenteNoteEl.style.color = 'var(--green)';
+      patenteNoteEl.style.display = '';
+    } else {
+      patenteSelectEl.disabled = false;
+      patenteNoteEl.textContent = 'CPF não localizado no cadastro oficial — patente não verificada automaticamente.';
+      patenteNoteEl.style.color = 'var(--amber)';
+      patenteNoteEl.style.display = '';
+    }
+  }
+  cpfInput.oninput = ()=>{ cpfInput.value = maskCpf(cpfInput.value); reevaluatePatenteFromCpf(); };
+  cpfInput.onblur = reevaluatePatenteFromCpf;
   bg.querySelector('#su-cancel').onclick = ()=> bg.remove();
   bg.querySelector('#su-form').onsubmit = (e)=>{
     e.preventDefault();
