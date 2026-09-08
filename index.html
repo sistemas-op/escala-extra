@@ -177,7 +177,7 @@ let adminUnlocked = false;
 let currentPin = null;
 let editingShiftId = null;
 let activeTab = 'vagas';
-// Consulta ativa da aba "Meus Voluntariados": { nome, cpfDigits } já validado,
+// Consulta ativa da aba "Meus Voluntariados": { cpfDigits } já validado,
 // ou null quando ainda não houve consulta (ou depois de trocar de aba).
 // Guardamos o CRITÉRIO e não a lista pronta de propósito: assim o resultado é
 // recalculado a cada render() — inclusive nas atualizações em tempo real do
@@ -1009,15 +1009,35 @@ function faseQuickButtonsHtml(s){
 // aparece aqui — cancelar continua exclusivamente na aba "Vagas Disponíveis",
 // vaga a vaga.
 
-// Mesma regra de identificação usada no cancelamento (openCancelModal): nome
-// comparado sem diferenciar maiúsculas/minúsculas e CPF comparado só pelos
-// dígitos, ignorando a máscara com que cada um foi digitado.
+// Compara o CPF buscado com um CPF SALVO que pode ter sido cadastrado no
+// padrão antigo "3 primeiros dígitos reais + 000000 no meio + 2 últimos
+// dígitos reais" (ex: 123.000.000-45) — vários voluntariados antigos foram
+// registrados assim. Se o CPF salvo tiver esse padrão de zeros no meio
+// (posições 4 a 9), compara só os 3 primeiros + 2 últimos dígitos; caso
+// contrário, exige os 11 dígitos completos iguais. É avaliada registro por
+// registro (não numa comparação única), então voluntariados antigos com
+// zeros e voluntariados novos com CPF completo real da MESMA pessoa aparecem
+// juntos numa mesma busca.
+// Função dedicada só à busca de "Meus Voluntariados": não reaproveita nem
+// altera cpfMatchesMasked, que serve a um contexto diferente (mascaramento
+// com 'X' vindo da escala oficial) e deve manter seu comportamento intacto.
+function comparePossiblyZeroMaskedCpf(cpfDigitsBusca, cpfDigitsSalvo){
+  if((cpfDigitsBusca||'').length !== 11 || (cpfDigitsSalvo||'').length !== 11) return false;
+  const meioSalvo = cpfDigitsSalvo.slice(3,9);
+  if(meioSalvo === '000000'){
+    return cpfDigitsSalvo.slice(0,3) === cpfDigitsBusca.slice(0,3)
+        && cpfDigitsSalvo.slice(9) === cpfDigitsBusca.slice(9);
+  }
+  return cpfDigitsSalvo === cpfDigitsBusca;
+}
+
+// Filtra pelo CPF (dígitos, ignorando a máscara com que foi digitado),
+// tolerando o padrão antigo de zeros no meio via comparePossiblyZeroMaskedCpf.
+// Nome não entra na comparação: variações de escrita (maiúsculo/minúsculo,
+// nome incompleto) causavam divergência, enquanto o CPF é identificador
+// único e confiável por si só.
 function meusSignupsFor(query){
-  const nomeAlvo = query.nome.toLowerCase();
-  return signups.filter(x =>
-    (x.nome||'').trim().toLowerCase() === nomeAlvo &&
-    (x.cpf||'').replace(/\D/g,'') === query.cpfDigits
-  );
+  return signups.filter(x => comparePossiblyZeroMaskedCpf(query.cpfDigits, (x.cpf||'').replace(/\D/g,'')));
 }
 
 function renderMeus(){
@@ -1030,24 +1050,20 @@ function renderMeus(){
   if(!el.querySelector('#meus-form')){
     el.innerHTML = '<div class="card">'
       + '<div class="section-title">Consultar meus voluntariados</div>'
-      + '<div class="muted-sm" style="margin-bottom:12px;">Informe o mesmo nome e CPF usados ao se voluntariar.</div>'
+      + '<div class="muted-sm" style="margin-bottom:12px;">Informe o mesmo CPF usado ao se voluntariar.</div>'
       + '<form id="meus-form">'
-      + '<div class="field"><label>Nome completo</label><input id="meus-nome" list="datalist-nomes" placeholder="Ex: Sd Eduardo Silva"></div>'
       + '<div class="field"><label>CPF</label><input id="meus-cpf" placeholder="000.000.000-00" maxlength="14" inputmode="numeric"></div>'
       + '<button type="submit" class="btn btn-primary btn-block">Consultar</button>'
       + '</form>'
       + '</div>'
       + '<div id="meus-resultado"></div>';
-    const nomeInput = el.querySelector('#meus-nome');
     const cpfInput = el.querySelector('#meus-cpf');
     cpfInput.oninput = ()=>{ cpfInput.value = maskCpf(cpfInput.value); };
     el.querySelector('#meus-form').onsubmit = (e)=>{
       e.preventDefault();
-      const nome = nomeInput.value.trim();
       const cpfDigits = cpfInput.value.replace(/\D/g,'');
-      if(!nome){ flagInvalid(nomeInput); showToast('Digite seu nome'); return; }
       if(cpfDigits.length !== 11){ flagInvalid(cpfInput); showToast('Digite um CPF válido'); return; }
-      meusQuery = { nome, cpfDigits };
+      meusQuery = { cpfDigits };
       renderMeusResultado();
     };
   }
@@ -1070,11 +1086,7 @@ function renderMeusResultado(){
     if(p && new Date(p.y, p.m-1, p.d) >= today) proximos.push(s); else historico.push(s);
   }
   if(!proximos.length && !historico.length){
-    // Mensagem genérica DE PROPÓSITO: é exatamente a mesma quando o nome não
-    // existe, quando existe mas o CPF não confere e quando simplesmente não há
-    // voluntariados. Diferenciar os casos confirmaria a um terceiro que aquele
-    // nome está cadastrado no sistema.
-    box.innerHTML = '<div class="card empty"><div class="big">Nada encontrado</div>Nenhum voluntariado encontrado para esse nome e CPF.</div>';
+    box.innerHTML = '<div class="card empty"><div class="big">Nada encontrado</div>Nenhum voluntariado encontrado para esse CPF.</div>';
     return;
   }
   // Chave vazia para data malformada: assim esses registros vão para o fim da
@@ -1114,8 +1126,8 @@ function meusSecaoHtml(titulo, lista){
 }
 
 // Descarta a consulta e devolve o formulário em branco. Chamado a cada troca
-// de aba: além de exigir nova consulta ao voltar, evita que o nome e o CPF de
-// alguém fiquem na tela para o próximo que usar o mesmo aparelho.
+// de aba: além de exigir nova consulta ao voltar, evita que o CPF de alguém
+// fique na tela para o próximo que usar o mesmo aparelho.
 function resetMeus(){
   meusQuery = null;
   const el = document.getElementById('view-meus');
@@ -2608,7 +2620,7 @@ function switchTab(tab){
     document.getElementById(TAB_VIEWS[nome]).style.display = (nome === tab) ? 'block' : 'none';
   }
   // Sair de "Meus Voluntariados" descarta a consulta anterior: quem voltar
-  // precisa informar nome e CPF de novo (ver resetMeus).
+  // precisa informar o CPF de novo (ver resetMeus).
   if(tab !== 'meus') resetMeus();
 }
 
