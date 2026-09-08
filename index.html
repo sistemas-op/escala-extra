@@ -33,6 +33,9 @@
     header .crest{max-width:64px;}
     header .title-row{gap:10px;}
     header h1{font-size:24px;}
+    /* Com três abas, os rótulos não cabem lado a lado em telas estreitas
+       no tamanho padrão — reduz fonte e recuo lateral em vez de quebrar. */
+    nav.tabs button{font-size:11.5px;padding:10px 3px;letter-spacing:.02em;}
   }
   nav.tabs{display:flex;gap:4px;margin:20px 0 18px;background:var(--panel);border:1px solid var(--border);border-radius:var(--r-md);padding:4px;}
   nav.tabs button{flex:1;padding:10px 8px;background:transparent;border:none;color:var(--muted);font-family:'Oswald',sans-serif;font-size:14px;letter-spacing:.04em;text-transform:uppercase;border-radius:var(--r-sm);cursor:pointer;}
@@ -124,9 +127,11 @@
   </header>
   <nav class="tabs">
     <button id="tab-vagas" class="active">Vagas Disponíveis</button>
+    <button id="tab-meus">Meus Voluntariados</button>
     <button id="tab-admin">Administração</button>
   </nav>
   <div id="view-vagas"></div>
+  <div id="view-meus" style="display:none;"></div>
   <div id="view-admin" style="display:none;"></div>
   <footer class="app-footer">Desenvolvido por Eduardo Valgoi</footer>
 </div>
@@ -172,6 +177,13 @@ let adminUnlocked = false;
 let currentPin = null;
 let editingShiftId = null;
 let activeTab = 'vagas';
+// Consulta ativa da aba "Meus Voluntariados": { nome, cpfDigits } já validado,
+// ou null quando ainda não houve consulta (ou depois de trocar de aba).
+// Guardamos o CRITÉRIO e não a lista pronta de propósito: assim o resultado é
+// recalculado a cada render() — inclusive nas atualizações em tempo real do
+// Firestore — e nunca mostra uma vaga que já mudou de fase/horário ou foi
+// excluída pela administração. Nunca é persistido.
+let meusQuery = null;
 // Estado (em memória, não persistido) de cada seção colapsável da Administração —
 // só existe enquanto o admin está navegando; sobrevive a re-renderizações (ex:
 // onSnapshot em tempo real) porque é uma variável de módulo, não algo recriado
@@ -988,6 +1000,127 @@ function faseQuickButtonsHtml(s){
     const shortLabel = o.v==='soldado' ? 'Sd' : (o.v==='todos' ? 'Todos' : (o.v==='sgt' ? 'Sgt' : 'Cabo'));
     return '<button class="btn '+(active?'btn-blue':'btn-ghost')+' btn-sm" '+(active?'disabled':'')+' onclick="setFase(\''+s.id+'\',\''+o.v+'\')">'+shortLabel+'</button>';
   }).join('') + '</div>';
+}
+
+// ---------- MEUS VOLUNTARIADOS (CONSULTA PÚBLICA, SOMENTE LEITURA) ----------
+
+// Aba pública onde o próprio policial consulta o histórico completo dele.
+// É deliberadamente só de leitura: nenhum botão de cancelar/editar/remover
+// aparece aqui — cancelar continua exclusivamente na aba "Vagas Disponíveis",
+// vaga a vaga.
+
+// Mesma regra de identificação usada no cancelamento (openCancelModal): nome
+// comparado sem diferenciar maiúsculas/minúsculas e CPF comparado só pelos
+// dígitos, ignorando a máscara com que cada um foi digitado.
+function meusSignupsFor(query){
+  const nomeAlvo = query.nome.toLowerCase();
+  return signups.filter(x =>
+    (x.nome||'').trim().toLowerCase() === nomeAlvo &&
+    (x.cpf||'').replace(/\D/g,'') === query.cpfDigits
+  );
+}
+
+function renderMeus(){
+  const el = document.getElementById('view-meus');
+  if(!el) return;
+  // O formulário é montado UMA única vez: render() roda a cada snapshot em
+  // tempo real do Firestore, e recriar o HTML aqui apagaria o que o usuário
+  // está digitando e tiraria o foco do campo no meio da digitação. Só o
+  // bloco de resultado é re-renderizado a cada chamada.
+  if(!el.querySelector('#meus-form')){
+    el.innerHTML = '<div class="card">'
+      + '<div class="section-title">Consultar meus voluntariados</div>'
+      + '<div class="muted-sm" style="margin-bottom:12px;">Informe o mesmo nome e CPF usados ao se voluntariar.</div>'
+      + '<form id="meus-form">'
+      + '<div class="field"><label>Nome completo</label><input id="meus-nome" list="datalist-nomes" placeholder="Ex: Sd Eduardo Silva"></div>'
+      + '<div class="field"><label>CPF</label><input id="meus-cpf" placeholder="000.000.000-00" maxlength="14" inputmode="numeric"></div>'
+      + '<button type="submit" class="btn btn-primary btn-block">Consultar</button>'
+      + '</form>'
+      + '</div>'
+      + '<div id="meus-resultado"></div>';
+    const nomeInput = el.querySelector('#meus-nome');
+    const cpfInput = el.querySelector('#meus-cpf');
+    cpfInput.oninput = ()=>{ cpfInput.value = maskCpf(cpfInput.value); };
+    el.querySelector('#meus-form').onsubmit = (e)=>{
+      e.preventDefault();
+      const nome = nomeInput.value.trim();
+      const cpfDigits = cpfInput.value.replace(/\D/g,'');
+      if(!nome){ flagInvalid(nomeInput); showToast('Digite seu nome'); return; }
+      if(cpfDigits.length !== 11){ flagInvalid(cpfInput); showToast('Digite um CPF válido'); return; }
+      meusQuery = { nome, cpfDigits };
+      renderMeusResultado();
+    };
+  }
+  renderMeusResultado();
+}
+
+function renderMeusResultado(){
+  const box = document.getElementById('meus-resultado');
+  if(!box) return;
+  if(!meusQuery){ box.innerHTML = ''; return; }
+  const today = new Date(); today.setHours(0,0,0,0);
+  const proximos = [];
+  const historico = [];
+  for(const su of meusSignupsFor(meusQuery)){
+    const s = shifts.find(x => x.id === su.shiftId);
+    if(!s) continue; // vaga já excluída pela administração — não há o que exibir
+    const p = parseDateStr(s.date);
+    // Data ausente/malformada (dado antigo) cai no histórico: mesmo critério
+    // de "não é futura" que renderVagas aplica, em vez de sumir da lista.
+    if(p && new Date(p.y, p.m-1, p.d) >= today) proximos.push(s); else historico.push(s);
+  }
+  if(!proximos.length && !historico.length){
+    // Mensagem genérica DE PROPÓSITO: é exatamente a mesma quando o nome não
+    // existe, quando existe mas o CPF não confere e quando simplesmente não há
+    // voluntariados. Diferenciar os casos confirmaria a um terceiro que aquele
+    // nome está cadastrado no sistema.
+    box.innerHTML = '<div class="card empty"><div class="big">Nada encontrado</div>Nenhum voluntariado encontrado para esse nome e CPF.</div>';
+    return;
+  }
+  // Chave vazia para data malformada: assim esses registros vão para o fim da
+  // seção em vez de serem ordenados alfabeticamente junto das datas válidas.
+  const chave = s => parseDateStr(s.date) ? ((s.date||'') + (s.startTime||'')) : '';
+  proximos.sort((a,b)=> chave(a).localeCompare(chave(b)));   // do mais próximo ao mais distante
+  historico.sort((a,b)=> chave(b).localeCompare(chave(a)));  // do mais recente ao mais antigo
+  const total = proximos.length + historico.length;
+  box.innerHTML = '<div class="refresh-row"><span class="muted-sm">'+total+' voluntariado(s) encontrado(s)</span></div>'
+    + meusSecaoHtml('Próximos', proximos)
+    + meusSecaoHtml('Histórico', historico);
+}
+
+// Reaproveita o mesmo card visual (.card.shift-card) da lista pública de
+// vagas, sem a parte interativa: nada de botão de voluntariar-se, cancelar ou
+// da lista de nomes dos outros voluntários.
+function meusSecaoHtml(titulo, lista){
+  if(!lista.length) return '';
+  let html = '<div class="section-title accent" style="margin-top:18px;">'+titulo+'</div>';
+  for(const s of lista){
+    try{
+      const dp = fmtDateParts(s.date);
+      html += '<div class="card shift-card" style="border-top-color:'+faseBorderColor(s.fase)+';">'
+        + '<div class="shift-date"><div class="dow">'+dp.dow+'</div><div class="dnum">'+dp.dnum+'</div><div class="mon">'+dp.mon+'</div></div>'
+        + '<div class="shift-body">'
+        + '<div class="shift-time">'+(s.startTime||'--:--')+' – '+(s.endTime||'--:--')+'</div>'
+        + (metaLine(s) ? '<div class="shift-local">'+metaLine(s)+'</div>' : '')
+        + '<div class="shift-meta"><span class="badge phase">'+faseLabel(s.fase)+'</span></div>'
+        + '</div></div>';
+    }catch(err){
+      // Mesmo isolamento por card usado em renderVagas: um registro com dado
+      // inesperado não pode derrubar a consulta inteira.
+      console.error('Erro ao renderizar voluntariado', s && s.id, err);
+    }
+  }
+  return html;
+}
+
+// Descarta a consulta e devolve o formulário em branco. Chamado a cada troca
+// de aba: além de exigir nova consulta ao voltar, evita que o nome e o CPF de
+// alguém fiquem na tela para o próximo que usar o mesmo aparelho.
+function resetMeus(){
+  meusQuery = null;
+  const el = document.getElementById('view-meus');
+  if(el) el.innerHTML = ''; // remove o #meus-form; renderMeus remonta tudo limpo
+  renderMeus();
 }
 
 // ---------- ADMIN ----------
@@ -2463,23 +2596,25 @@ function updateLockScreen(){
 function render(){
   updateLockScreen();
   if(bloqueioTotal) return; // bloqueio prevalece sobre qualquer estado local (aba ativa, PIN validado, etc.)
-  renderVagas(); renderAdmin(); refreshDatalists();
+  renderVagas(); renderMeus(); renderAdmin(); refreshDatalists();
 }
 
-document.getElementById('tab-vagas').onclick = ()=>{
-  activeTab = 'vagas';
-  document.getElementById('tab-vagas').classList.add('active');
-  document.getElementById('tab-admin').classList.remove('active');
-  document.getElementById('view-vagas').style.display='block';
-  document.getElementById('view-admin').style.display='none';
-};
-document.getElementById('tab-admin').onclick = ()=>{
-  activeTab = 'admin';
-  document.getElementById('tab-admin').classList.add('active');
-  document.getElementById('tab-vagas').classList.remove('active');
-  document.getElementById('view-admin').style.display='block';
-  document.getElementById('view-vagas').style.display='none';
-};
+const TAB_VIEWS = { vagas:'view-vagas', meus:'view-meus', admin:'view-admin' };
+
+function switchTab(tab){
+  activeTab = tab;
+  for(const nome of Object.keys(TAB_VIEWS)){
+    document.getElementById('tab-'+nome).classList.toggle('active', nome === tab);
+    document.getElementById(TAB_VIEWS[nome]).style.display = (nome === tab) ? 'block' : 'none';
+  }
+  // Sair de "Meus Voluntariados" descarta a consulta anterior: quem voltar
+  // precisa informar nome e CPF de novo (ver resetMeus).
+  if(tab !== 'meus') resetMeus();
+}
+
+document.getElementById('tab-vagas').onclick = ()=> switchTab('vagas');
+document.getElementById('tab-meus').onclick = ()=> switchTab('meus');
+document.getElementById('tab-admin').onclick = ()=> switchTab('admin');
 
 // Expõe as funções chamadas via onclick inline (fora do escopo do module) para o window
 window.refreshAll = refreshAll;
