@@ -2242,20 +2242,27 @@ function removePoliciaExterno(id){
 const ESCALA_REPORT_TITLE = 'ESCALA EXTRAJORNADA VOLUNTÁRIA – 1ª CIA/16º BPM';
 const ESCALA_REPORT_HEADERS = ['CIDADE', 'DIA E HORÁRIO', 'VTR - Setor', 'PMs ESCALADO'];
 
-// Monta, por vaga futura ("upcoming": data >= hoje), os dados já no formato
-// do modelo oficial. Cada bloco vira 1+ linhas na tabela final: uma linha por
-// voluntário (mínimo 1, mesmo sem voluntário nenhum, pra vaga aparecer vazia),
-// com Cidade/Dia e Horário/VTR-Setor repetidos apenas na 1ª linha do bloco —
-// as demais colunas dessas ficam mescladas verticalmente por quem consome
-// este array (ver exportEscalaXlsx/exportEscalaDocx).
+// Monta, por vaga do MÊS ATUAL (dia 1 ao último dia do mês corrente, passadas
+// e futuras — não usa o mesmo critério "data >= hoje" da tela pública), os
+// dados já no formato do modelo oficial. Mês/ano de hoje e de cada vaga são
+// comparados via parseDateStr (extração numérica direta da string
+// 'YYYY-MM-DD'), sem instanciar Date a partir de hoje para essa comparação —
+// evita qualquer risco de fuso horário deslocar o dia/mês. Cada bloco vira
+// 1+ linhas na tabela final: uma linha por voluntário (mínimo 1, mesmo sem
+// voluntário nenhum, pra vaga aparecer vazia), com Cidade/Dia e Horário/
+// VTR-Setor repetidos apenas na 1ª linha do bloco — as demais colunas dessas
+// ficam mescladas verticalmente por quem consome este array (ver
+// exportEscalaXlsx/exportEscalaDocx).
 function buildEscalaReportBlocks(){
-  const today = new Date(); today.setHours(0,0,0,0);
-  const upcoming = shifts
-    .filter(s=>{ const p=parseDateStr(s && s.date); return p ? new Date(p.y,p.m-1,p.d) >= today : false; })
+  const now = new Date();
+  const anoAtual = now.getFullYear();
+  const mesAtual = now.getMonth() + 1;
+  const doMesAtual = shifts
+    .filter(s=>{ const p=parseDateStr(s && s.date); return p ? (p.y===anoAtual && p.m===mesAtual) : false; })
     .slice()
     .sort((a,b)=> (a.date+a.startTime).localeCompare(b.date+b.startTime));
 
-  return upcoming.map(s=>{
+  return doMesAtual.map(s=>{
     const [y,m,d] = s.date.split('-');
     const dataFmt = d+'/'+m+'/'+y;
     const diaHorario = dataFmt+', '+s.startTime+'–'+s.endTime;
