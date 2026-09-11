@@ -833,7 +833,9 @@ function renderVagas(){
           + '<button class="btn btn-primary" '+((cheias||fechada)?'disabled':'')+' onclick="openSignupModal(\''+s.id+'\')">'+(fechada?'Fechada':(cheias?'Esgotado':'Voluntariar-se'))+'</button>'
           + '</div>'
           + (su.length ? '<div class="names">'+su.map(x=>'<span class="name-chip">'+escapeHtml(x.nome)+' <span class="rank-tag '+escapeHtml(x.patente||'')+'">'+escapeHtml(RANK_LABEL[x.patente]||x.patente||'N/D')+'</span></span>').join('')+'</div>' : '')
-          + '<button class="link-btn" style="margin-top:8px;" onclick="openCancelModal(\''+s.id+'\')">Cancelar meu voluntariado</button>'
+          + (fechada
+              ? '<div class="muted-sm" style="margin-top:8px;">Cancelamentos bloqueados (vaga fechada)</div>'
+              : '<button class="link-btn" style="margin-top:8px;" onclick="openCancelModal(\''+s.id+'\')">Cancelar meu voluntariado</button>')
           + '</div></div>';
       }catch(err){
         console.error('Erro ao renderizar vaga', s && s.id, err);
@@ -962,6 +964,11 @@ function openSignupModal(shiftId){
 function openCancelModal(shiftId){
   const s = shifts.find(x=>x.id===shiftId);
   if(!s) return;
+  // Mesmo reforço aplicado em openSignupModal: o link já vem oculto/bloqueado
+  // para vaga fechada, mas isso só é reaplicado na próxima render(); revalida
+  // aqui contra o estado atual de shifts para cobrir o intervalo entre a
+  // última renderização e o clique.
+  if(s.fase === 'nenhum'){ showToast('Esta vaga está fechada e não aceita cancelamentos no momento.'); render(); return; }
   const dp = fmtDateParts(s.date);
   const bg = document.createElement('div');
   bg.className = 'modal-bg';
@@ -986,6 +993,11 @@ function openCancelModal(shiftId){
     const cpfDigits = cnCpfInput.value.replace(/\D/g,'');
     if(!nome){ flagInvalid(cnNomeInput); showToast('Digite seu nome'); return; }
     if(cpfDigits.length !== 11){ flagInvalid(cnCpfInput); showToast('Digite um CPF válido'); return; }
+    // Revalida no momento da confirmação, não só na abertura do modal: a
+    // fase pode ter virado 'nenhum' enquanto o modal estava aberto.
+    const freshShift = shifts.find(x=>x.id===shiftId);
+    if(!freshShift){ showToast('Vaga não encontrada'); bg.remove(); return; }
+    if(freshShift.fase === 'nenhum'){ showToast('Esta vaga está fechada e não aceita cancelamentos no momento.'); bg.remove(); render(); return; }
     const match = signupsFor(shiftId).find(x=>x.nome.toLowerCase()===nome.toLowerCase());
     if(!match){ flagInvalid(cnNomeInput); showToast('Nome não encontrado nesta vaga'); return; }
     const matchCpfDigits = (match.cpf||'').replace(/\D/g,'');
