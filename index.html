@@ -206,14 +206,21 @@ const TEAM_LETTERS = ['A','B','C','D'];
 const TURNO_LABEL = { dia: 'Dia', noite: 'Noite' };
 
 // Fases de liberação de uma vaga: grupos EXATOS e independentes (sem cascata).
-// 'sgt'/'cabo'/'soldado' liberam só aquela patente; 'todos' libera as três.
+// 'sgt'/'cabo'/'soldado' liberam só aquela patente; 'todos' libera as três;
+// 'nenhum' fecha a vaga por completo (nenhuma patente pode se voluntariar) —
+// ver allowedRanks.
 const FASE_OPTIONS = [
   { v:'sgt', label:'Somente Sargentos' },
   { v:'cabo', label:'Somente Cabos' },
   { v:'soldado', label:'Somente Soldados' },
-  { v:'todos', label:'Todos (Sgt, Cabo, Sd)' }
+  { v:'todos', label:'Todos (Sgt, Cabo, Sd)' },
+  { v:'nenhum', label:'Fechada (ninguém pode se voluntariar)' }
 ];
-const FASE_LABEL = { sgt:'Somente Sargentos', cabo:'Somente Cabos', soldado:'Somente Soldados', todos:'Todos os postos/graduações' };
+const FASE_LABEL = { sgt:'Somente Sargentos', cabo:'Somente Cabos', soldado:'Somente Soldados', todos:'Todos os postos/graduações', nenhum:'Fechada temporariamente' };
+// Rótulo curto usado nos botões de atalho de fase (por vaga e em lote) —
+// mesmo texto em ambos os lugares para não confundir o admin.
+const FASE_SHORT_LABEL = { sgt:'Sgt', cabo:'Cabo', soldado:'Sd', todos:'Todos', nenhum:'Fechada' };
+function faseShortLabel(fase){ return FASE_SHORT_LABEL[fase] || fase; }
 
 function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,8); }
 // A serialização de texto do navegador (textContent -> innerHTML) já escapa
@@ -242,17 +249,21 @@ function flagInvalid(el){
 function allowedRanks(fase){
   if(fase === 'todos') return ['sgt','cabo','soldado'];
   if(fase === 'sgt' || fase === 'cabo' || fase === 'soldado') return [fase];
+  if(fase === 'nenhum') return []; // fechada: nenhuma patente pode se voluntariar
   return ['sgt']; // fallback defensivo para valor de fase ausente/inesperado
 }
 function faseLabel(fase){ return FASE_LABEL[fase] || FASE_LABEL.sgt; }
 // Cor de destaque (borda superior do card) por fase liberada: reaproveita o
 // mesmo mapeamento de cor já usado nos rank-tags (sgt=âmbar, cabo=azul,
 // soldado=verde-menta); 'todos' usa o verde institucional, marcando a
-// abertura total como o estado de maior "peso" visual.
+// abertura total como o estado de maior "peso" visual; 'nenhum' (fechada)
+// usa vermelho — do contrário cairia no mesmo verde de 'todos', o que
+// sinalizaria justamente o oposto do estado real da vaga.
 function faseBorderColor(fase){
   if(fase === 'sgt') return 'var(--amber)';
   if(fase === 'cabo') return 'var(--blue)';
   if(fase === 'soldado') return 'var(--green)';
+  if(fase === 'nenhum') return 'var(--red)';
   return 'var(--green-inst)';
 }
 function faseSelectOptions(selected){
@@ -807,6 +818,7 @@ function renderVagas(){
         const su = signupsFor(s.id);
         const vagasTotal = s.vagas || 0;
         const cheias = su.length >= vagasTotal;
+        const fechada = s.fase === 'nenhum';
         const dp = fmtDateParts(s.date);
         html += '<div class="card shift-card" style="border-top-color:'+faseBorderColor(s.fase)+';">'
           + '<div class="shift-date"><div class="dow">'+dp.dow+'</div><div class="dnum">'+dp.dnum+'</div><div class="mon">'+dp.mon+'</div></div>'
@@ -818,7 +830,7 @@ function renderVagas(){
           + '<span class="badge phase">'+faseLabel(s.fase)+'</span>'
           + '</div>'
           + '<div style="margin-top:10px;">'
-          + '<button class="btn btn-primary" '+(cheias?'disabled':'')+' onclick="openSignupModal(\''+s.id+'\')">'+(cheias?'Esgotado':'Voluntariar-se')+'</button>'
+          + '<button class="btn btn-primary" '+((cheias||fechada)?'disabled':'')+' onclick="openSignupModal(\''+s.id+'\')">'+(fechada?'Fechada':(cheias?'Esgotado':'Voluntariar-se'))+'</button>'
           + '</div>'
           + (su.length ? '<div class="names">'+su.map(x=>'<span class="name-chip">'+escapeHtml(x.nome)+' <span class="rank-tag '+escapeHtml(x.patente||'')+'">'+escapeHtml(RANK_LABEL[x.patente]||x.patente||'N/D')+'</span></span>').join('')+'</div>' : '')
           + '<button class="link-btn" style="margin-top:8px;" onclick="openCancelModal(\''+s.id+'\')">Cancelar meu voluntariado</button>'
@@ -838,6 +850,12 @@ function rankOptions(allowed){
 function openSignupModal(shiftId){
   const s = shifts.find(x=>x.id===shiftId);
   if(!s) return;
+  // O botão já vem desabilitado para vaga fechada, mas isso só é reaplicado
+  // na próxima render(); se a fase mudou para 'nenhum' entre a última
+  // renderização e o clique (ex: atualização em tempo real do Firestore
+  // chegando nesse intervalo), o botão antigo ainda estava clicável — por
+  // isso o estado é revalidado aqui, na hora de abrir o modal.
+  if(s.fase === 'nenhum'){ showToast('Esta vaga está fechada e não aceita voluntariados.'); render(); return; }
   const dp = fmtDateParts(s.date);
   const allowed = allowedRanks(s.fase);
   const bg = document.createElement('div');
@@ -900,6 +918,9 @@ function openSignupModal(shiftId){
     if(cpfDigits.length !== 11){ flagInvalid(cpfInput); showToast('Digite um CPF válido'); return; }
     const freshShift = shifts.find(x=>x.id===shiftId);
     if(!freshShift){ showToast('Vaga não encontrada'); bg.remove(); return; }
+    // Revalida no momento da confirmação, não só na abertura do modal: a
+    // fase pode ter virado 'nenhum' enquanto o modal estava aberto.
+    if(freshShift.fase === 'nenhum'){ showToast('Esta vaga está fechada e não aceita voluntariados.'); bg.remove(); render(); return; }
     const su = signupsFor(shiftId);
     if(!allowedRanks(freshShift.fase).includes(patente)){ flagInvalid(patenteEl); showToast('Essa vaga ainda não está liberada para '+RANK_LABEL[patente]); return; }
     if(su.length >= freshShift.vagas){ showToast('Vaga esgotada, atualize a página'); bg.remove(); render(); return; }
@@ -995,11 +1016,33 @@ function setFase(shiftId, novaFase){
 }
 
 function faseQuickButtonsHtml(s){
-  return '<div style="display:flex;gap:4px;">' + FASE_OPTIONS.map(o=>{
+  return '<div style="display:flex;gap:4px;flex-wrap:wrap;">' + FASE_OPTIONS.map(o=>{
     const active = s.fase === o.v;
-    const shortLabel = o.v==='soldado' ? 'Sd' : (o.v==='todos' ? 'Todos' : (o.v==='sgt' ? 'Sgt' : 'Cabo'));
-    return '<button class="btn '+(active?'btn-blue':'btn-ghost')+' btn-sm" '+(active?'disabled':'')+' onclick="setFase(\''+s.id+'\',\''+o.v+'\')">'+shortLabel+'</button>';
+    return '<button class="btn '+(active?'btn-blue':'btn-ghost')+' btn-sm" '+(active?'disabled':'')+' onclick="setFase(\''+s.id+'\',\''+o.v+'\')">'+faseShortLabel(o.v)+'</button>';
   }).join('') + '</div>';
+}
+
+// Aplica a mesma fase a TODAS as vagas cadastradas de uma vez (inclusive as
+// que já passaram) — atalho para não precisar ajustar vaga por vaga quando o
+// admin quer, por exemplo, fechar tudo de uma tacada ou reabrir tudo para
+// todas as patentes. Não impede o ajuste manual individual depois: os
+// atalhos por vaga e o formulário de edição continuam funcionando normalmente
+// e podem divergir do valor aplicado aqui.
+function applyFaseToAll(novaFase){
+  const total = shifts.length;
+  if(total === 0){ showToast('Nenhuma vaga cadastrada'); return; }
+  const label = faseShortLabel(novaFase);
+  openConfirmModal({
+    titulo: 'Aplicar fase a todas as vagas?',
+    mensagem: 'Isso vai definir a fase de TODAS as '+total+' vagas cadastradas (incluindo as que já passaram) para \''+label+'\'. Esta ação pode ser desfeita ajustando vaga por vaga depois. Continuar?',
+    textoConfirmar: 'Sim, aplicar a todas',
+    onConfirm: ()=>{
+      shifts.forEach(s=>{ s.fase = novaFase; });
+      showToast('Fase \''+label+'\' aplicada a '+total+' vaga(s).');
+      render();
+      persistBulkUpsert(shifts, []);
+    }
+  });
 }
 
 // ---------- MEUS VOLUNTARIADOS (CONSULTA PÚBLICA, SOMENTE LEITURA) ----------
@@ -1292,6 +1335,18 @@ function renderAdmin(){
     + '</form>'
     + '<button class="btn btn-ghost btn-sm" style="margin-top:10px;" id="lote-open-btn">Importar vagas em lote</button>';
   html += renderAdminSection('novaVaga', 'Nova vaga', sectionHtml);
+
+  // Barra de aplicação em massa: fica FORA do card colapsável de "Vagas
+  // Cadastradas" (sempre visível, mesmo com a seção recolhida), logo acima
+  // dela. Ordem dos botões pedida explicitamente: Fechada/Sgt/Cabo/Sd/Todos —
+  // diferente da ordem usada nos atalhos por vaga (que segue FASE_OPTIONS).
+  html += '<div class="card">'
+    + '<div class="muted-sm" style="margin-bottom:8px;">Aplicar a todas as vagas:</div>'
+    + '<div style="display:flex;gap:6px;flex-wrap:wrap;">'
+    + ['nenhum','sgt','cabo','soldado','todos'].map(v=>
+        '<button class="btn '+(v==='nenhum'?'btn-danger':'btn-ghost')+' btn-sm" onclick="applyFaseToAll(\''+v+'\')">'+faseShortLabel(v)+'</button>'
+      ).join('')
+    + '</div></div>';
 
   sectionHtml = '<div class="refresh-row"><span class="muted-sm">'+shifts.length+' vaga(s) cadastradas</span><button class="link-btn" onclick="event.stopPropagation(); refreshAll()">Atualizar</button></div>';
 
@@ -2446,7 +2501,7 @@ function parseLoteLine(rawLine){
   if(!/^\d+$/.test(vagasStr) || vagasNum < 1) errors.push('quantidade de vagas inválida (use um número inteiro ≥ 1)');
 
   const faseNorm = faseRaw.toLowerCase();
-  if(!FASE_OPTIONS.some(o=>o.v===faseNorm)) errors.push('fase não reconhecida (use sgt, cabo, soldado ou todos)');
+  if(!FASE_OPTIONS.some(o=>o.v===faseNorm)) errors.push('fase não reconhecida (use sgt, cabo, soldado, todos ou nenhum)');
 
   if(errors.length > 0) return { raw: rawLine, valid: false, error: errors.join('; ') };
   return { raw: rawLine, valid: true, shift: { date: dateOut, startTime: startStr, endTime: endStr, local: localRaw, viatura: viaturaRaw, vagas: vagasNum, fase: faseNorm } };
@@ -2640,6 +2695,7 @@ window.refreshAll = refreshAll;
 window.openSignupModal = openSignupModal;
 window.openCancelModal = openCancelModal;
 window.setFase = setFase;
+window.applyFaseToAll = applyFaseToAll;
 window.startEditShift = startEditShift;
 window.deleteShift = deleteShift;
 window.removeSignup = removeSignup;
