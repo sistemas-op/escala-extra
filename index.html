@@ -373,20 +373,15 @@ function persistBulkUpsert(newShifts, newSignups){
   if(newSignups && newSignups.length){ patch.signups = {}; newSignups.forEach(su=>{ patch.signups[su.id] = su; }); }
   setDoc(docRef, patch, { merge: true }).catch(handlePersistError);
 }
-// "Apagar tudo": substitui os mapas inteiros por vazios (precisa de
-// updateDoc, já que setDoc com merge:true e {} não apaga chaves existentes).
-// newLixeira (opcional) é gravado no mesmo updateDoc — a cópia de segurança
-// entra no documento atomicamente junto com o próprio wipe.
-function persistWipeAll(newLixeira){
-  const patch = { shifts: {}, signups: {} };
-  if(newLixeira) patch.lixeira = newLixeira;
-  updateDoc(docRef, patch).catch(handlePersistError);
-}
 // Monta uma nova entrada de lixeira (cópia profunda dos dados que a ação
 // destrutiva está prestes a apagar) e devolve a lista já atualizada — mais
 // recente primeiro, truncada em LIXEIRA_MAX. Só atualiza 'lixeira' em
 // memória; quem chama é responsável por incluir a lista devolvida no mesmo
-// patch/persist da ação destrutiva (ver persistShiftDelete/persistWipeAll).
+// patch/persist da ação destrutiva (ver persistShiftDelete). Não existe mais
+// nenhuma ação que apague TODAS as vagas de uma vez (ver histórico: o botão
+// "Apagar tudo"/clearAllData/persistWipeAll foram removidos após um wipe
+// total de 'shifts' sem rastro na lixeira, cuja causa não foi possível
+// atribuir a nenhum caminho do código deste app).
 function addLixeiraEntry(tipo, dadosOriginais){
   const entry = {
     id: uid(),
@@ -1254,7 +1249,6 @@ function renderAdmin(){
     + '<button class="btn btn-blue btn-sm" id="demo-btn">Carregar exemplo</button>'
     + '<button class="btn btn-blue btn-sm" id="export-xlsx-btn">Gerar relatório (Excel)</button>'
     + '<button class="btn btn-blue btn-sm" id="export-docx-btn">Gerar relatório (Word)</button>'
-    + '<button class="btn btn-danger btn-sm" id="clear-btn">Apagar tudo</button>'
     + '</div>';
 
   const hasCalendario = !!(calendarioOficial && Object.keys(calendarioOficial).length > 0);
@@ -1432,7 +1426,7 @@ function renderAdmin(){
   if(lixeira.length === 0){
     sectionHtml += '<div class="muted-sm">Nenhuma ação destrutiva registrada ainda.</div>';
   } else {
-    sectionHtml += '<div class="muted-sm" style="margin-bottom:10px;">Cópia de segurança automática das últimas '+LIXEIRA_MAX+' ações de "Apagar tudo" / "Excluir vaga". Restaurar acrescenta os dados de volta sem apagar nada criado depois.</div>';
+    sectionHtml += '<div class="muted-sm" style="margin-bottom:10px;">Cópia de segurança automática das últimas '+LIXEIRA_MAX+' ações de "Excluir vaga". Restaurar acrescenta os dados de volta sem apagar nada criado depois.</div>';
     sectionHtml += '<div class="table-wrap"><table class="roster"><thead><tr><th>Quando</th><th>Ação</th><th>Resumo</th><th></th></tr></thead><tbody>';
     lixeira.forEach(entry=>{
       sectionHtml += '<tr><td>'+fmtLixeiraTimestamp(entry.timestamp)+'</td>'
@@ -1454,8 +1448,6 @@ function renderAdmin(){
   if(exportBtn){ exportBtn.onclick = exportEscalaXlsx; }
   const exportDocxBtn = el.querySelector('#export-docx-btn');
   if(exportDocxBtn){ exportDocxBtn.onclick = exportEscalaDocx; }
-  const clearBtn = el.querySelector('#clear-btn');
-  if(clearBtn){ clearBtn.onclick = clearAllData; }
   const addExternoBtn = el.querySelector('#add-externo-btn');
   if(addExternoBtn){ addExternoBtn.onclick = addPoliciaExterno; }
   const impEquipesOpenBtn = el.querySelector('#imp-equipes-open-btn');
@@ -2640,23 +2632,6 @@ function loadDemoData(){
       showToast('Exemplo carregado');
       render();
       persistBulkUpsert([s1, s2, s3], demoSignups);
-    }
-  });
-}
-
-function clearAllData(){
-  openConfirmModal({
-    titulo: 'Apagar todas as vagas e voluntários?',
-    mensagem: 'Esta ação é irreversível e vai apagar PERMANENTEMENTE todas as vagas extras e voluntários cadastrados atualmente, incluindo dados reais dos policiais. Esta ação não pode ser desfeita.',
-    textoConfirmar: 'Sim, apagar tudo',
-    perigo: true,
-    onConfirm: ()=>{
-      const newLixeira = addLixeiraEntry('apagar_tudo', { shifts, signups });
-      shifts = [];
-      signups = [];
-      showToast('Tudo apagado');
-      render();
-      persistWipeAll(newLixeira);
     }
   });
 }
