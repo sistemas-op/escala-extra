@@ -33,9 +33,16 @@
     header .crest{max-width:64px;}
     header .title-row{gap:10px;}
     header h1{font-size:24px;}
-    /* Com três abas, os rótulos não cabem lado a lado em telas estreitas
+    /* Com quatro abas, os rótulos não cabem lado a lado em telas estreitas
        no tamanho padrão — reduz fonte e recuo lateral em vez de quebrar. */
     nav.tabs button{font-size:11.5px;padding:10px 3px;letter-spacing:.02em;}
+  }
+  @media (max-width:480px){
+    /* "Minha Agenda" fez a barra de 4 abas passar de aperto pra não caber —
+       em vez de continuar encolhendo a fonte indefinidamente, quebra em
+       2 linhas de 2 abas (mesmo padrão dos cards de calendário abaixo). */
+    nav.tabs{flex-wrap:wrap;}
+    nav.tabs button{flex:1 1 46%;}
   }
   nav.tabs{display:flex;gap:4px;margin:20px 0 18px;background:var(--panel);border:1px solid var(--border);border-radius:var(--r-md);padding:4px;}
   nav.tabs button{flex:1;padding:10px 8px;background:transparent;border:none;color:var(--muted);font-family:'Oswald',sans-serif;font-size:14px;letter-spacing:.04em;text-transform:uppercase;border-radius:var(--r-sm);cursor:pointer;}
@@ -104,6 +111,31 @@
   .rank-tag.sgt{color:var(--amber);}
   .rank-tag.cabo{color:var(--blue);}
   .rank-tag.soldado{color:var(--green);}
+  .agenda-weekdays{display:grid;grid-template-columns:repeat(7,1fr);gap:6px;margin-bottom:6px;}
+  .agenda-weekdays span{text-align:center;font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.06em;color:var(--muted);text-transform:uppercase;}
+  .agenda-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:6px;}
+  .agenda-cell{background:var(--panel-2);border:1px solid var(--border);border-radius:var(--r-sm);padding:6px 5px;min-height:78px;cursor:pointer;display:flex;flex-direction:column;}
+  .agenda-cell.empty{visibility:hidden;pointer-events:none;}
+  .agenda-cell.selected{border-color:var(--amber);}
+  .agenda-daynum{font-family:'Oswald',sans-serif;font-size:13px;color:var(--text);}
+  .agenda-blocks{display:flex;flex-direction:column;gap:2px;margin-top:5px;}
+  .agenda-block{font-family:'JetBrains Mono',monospace;font-size:10px;padding:2px 5px;border-radius:var(--r-sm);line-height:1.4;}
+  .agenda-block.ordinaria{background:var(--blue-dim);color:var(--blue);}
+  .agenda-block.extra{background:var(--amber-dim);color:var(--amber);}
+  .agenda-dots{display:none;gap:4px;margin-top:6px;}
+  .agenda-dots .dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;}
+  .agenda-dots .dot.ordinaria{background:var(--blue);}
+  .agenda-dots .dot.extra{background:var(--amber);}
+  .agenda-detail{margin-top:14px;}
+  @media (max-width:640px){
+    /* Em telas estreitas a grade continua (não vira lista): só troca o texto
+       completo do turno por indicadores compactos, com o detalhe aparecendo
+       ao tocar no dia (ver toggleAgendaDay/agendaDetalheHtml). */
+    .agenda-cell{min-height:46px;padding:4px 3px;}
+    .agenda-daynum{font-size:11.5px;}
+    .agenda-blocks{display:none;}
+    .agenda-dots{display:flex;}
+  }
   .app-footer{margin-top:32px;padding-top:16px;border-top:1px solid var(--green-inst-dim);text-align:center;font-family:'Inter',sans-serif;font-size:11.5px;color:var(--muted);}
   .lock-screen{position:fixed;inset:0;background:var(--bg);color:var(--muted);display:none;align-items:center;justify-content:center;text-align:center;padding:24px;font-family:'Inter',sans-serif;font-size:15px;z-index:200;}
 </style>
@@ -128,10 +160,12 @@
   <nav class="tabs">
     <button id="tab-vagas" class="active">Vagas Disponíveis</button>
     <button id="tab-meus">Meus Voluntariados</button>
+    <button id="tab-agenda">Minha Agenda</button>
     <button id="tab-admin">Administração</button>
   </nav>
   <div id="view-vagas"></div>
   <div id="view-meus" style="display:none;"></div>
+  <div id="view-agenda" style="display:none;"></div>
   <div id="view-admin" style="display:none;"></div>
   <footer class="app-footer">Desenvolvido por Eduardo Valgoi</footer>
 </div>
@@ -1183,6 +1217,208 @@ function resetMeus(){
   const el = document.getElementById('view-meus');
   if(el) el.innerHTML = ''; // remove o #meus-form; renderMeus remonta tudo limpo
   renderMeus();
+}
+
+// ---------- MINHA AGENDA (calendário do mês corrente: ordinário + extra) ----------
+// Mesmo padrão de meusQuery/resetMeus: guarda só o CRITÉRIO já validado (não
+// o calendário pronto), pra que o resultado seja recalculado a cada render()
+// — inclusive nas atualizações em tempo real do Firestore — e reiniciado a
+// cada troca de aba (ver resetAgenda). Nunca é persistido.
+let agendaQuery = null;
+// Dia ('YYYY-MM-DD') selecionado no calendário pra exibir o detalhe completo
+// abaixo da grade (texto por extenso do turno/vaga extra). É assim que a
+// grade compacta de celular expõe a informação completa ao toque, sem virar
+// lista vertical (ver .agenda-cell/.agenda-dots no CSS). Reiniciado junto com
+// agendaQuery.
+let agendaSelectedDate = null;
+
+// Todas as datas ('YYYY-MM-DD') do mês corrente, do dia 1 ao último. Mesmo
+// cuidado de construir com Date(y,m,d) local (nunca toISOString/new
+// Date('YYYY-MM-DD') em UTC) já usado em fmtDateParts/shiftDateStr.
+function agendaDiasDoMes(){
+  const hoje = new Date();
+  const y = hoje.getFullYear(), m = hoje.getMonth();
+  const totalDias = new Date(y, m+1, 0).getDate();
+  const dias = [];
+  for(let d=1; d<=totalDias; d++){
+    dias.push(y+'-'+String(m+1).padStart(2,'0')+'-'+String(d).padStart(2,'0'));
+  }
+  return dias;
+}
+
+// Turno ORDINÁRIO (serviço normal) do CPF numa data: 'dia', 'noite' ou null
+// (folga naquele turno, calendário/ciclo ainda não cobre a data, ou CPF não
+// encontrado na equipe escalada). Reaproveita exatamente as mesmas peças já
+// usadas em findEscalaConflict/findRestConflict — getEquipeDoTurno,
+// getEscalaVigente, turnoStartISO, isFuncaoSuplementar e cpfMatchesMasked —
+// só que aplicadas direto ao dia inteiro, sem comparar contra o horário de
+// uma vaga extra específica (não há sobreposição pra calcular aqui).
+function turnoOrdinarioDoCpf(dateStr, cpfDigits){
+  const diaCal = getEquipeDoTurno(dateStr);
+  if(!diaCal) return null;
+  for(const turno of ['dia','noite']){
+    const equipeLetra = diaCal[turno];
+    if(!equipeLetra) continue;
+    const periodo = getEscalaVigente(turnoStartISO(dateStr, turno));
+    if(!periodo) continue;
+    const membros = periodo.equipes[equipeLetra];
+    if(!membros) continue;
+    const found = membros.find(m=> !isFuncaoSuplementar(m.funcao) && cpfMatchesMasked(cpfDigits, m.cpf));
+    if(found) return turno;
+  }
+  return null;
+}
+
+// Monta os dados do mês corrente para o CPF consultado: turno ordinário (ou
+// null) e as vagas extra confirmadas em cada dia, mais uma flag indicando se
+// o CPF foi encontrado em alguma equipe em pelo menos um dia do mês (usada
+// pro aviso de "escala ordinária não localizada").
+function agendaCalcularMes(cpfDigits){
+  const dias = agendaDiasDoMes();
+  const diasSet = new Set(dias);
+  // meusSignupsFor já aplica a mesma comparação tolerante a zeros usada em
+  // "Meus Voluntariados" (comparePossiblyZeroMaskedCpf) — reaproveitada aqui
+  // sem duplicar a lógica de busca por CPF.
+  const extrasDoMes = meusSignupsFor({ cpfDigits })
+    .map(su => shifts.find(x=>x.id===su.shiftId))
+    .filter(s => s && diasSet.has(s.date));
+  let temOrdinariaNoMes = false;
+  const porDia = {};
+  for(const dateStr of dias){
+    const turno = turnoOrdinarioDoCpf(dateStr, cpfDigits);
+    if(turno) temOrdinariaNoMes = true;
+    porDia[dateStr] = { turno, extras: extrasDoMes.filter(s=> s.date === dateStr) };
+  }
+  return { porDia, temOrdinariaNoMes };
+}
+
+function renderAgenda(){
+  const el = document.getElementById('view-agenda');
+  if(!el) return;
+  // Mesmo padrão de renderMeus: o formulário só é montado uma vez, pra não
+  // perder foco/digitação a cada render() disparado por atualização em tempo
+  // real do Firestore — só o bloco de resultado é refeito.
+  if(!el.querySelector('#agenda-form')){
+    el.innerHTML = '<div class="card">'
+      + '<div class="section-title">Minha agenda do mês</div>'
+      + '<div class="muted-sm" style="margin-bottom:12px;">Informe seu CPF para ver o calendário deste mês com seu serviço ordinário e extra.</div>'
+      + '<form id="agenda-form">'
+      + '<div class="field"><label>CPF</label><input id="agenda-cpf" placeholder="000.000.000-00" maxlength="14" inputmode="numeric"></div>'
+      + '<button type="submit" class="btn btn-primary btn-block">Consultar</button>'
+      + '</form>'
+      + '</div>'
+      + '<div id="agenda-resultado"></div>';
+    const cpfInput = el.querySelector('#agenda-cpf');
+    cpfInput.oninput = ()=>{ cpfInput.value = maskCpf(cpfInput.value); };
+    el.querySelector('#agenda-form').onsubmit = (e)=>{
+      e.preventDefault();
+      const cpfDigits = cpfInput.value.replace(/\D/g,'');
+      if(cpfDigits.length !== 11){ flagInvalid(cpfInput); showToast('Digite um CPF válido'); return; }
+      agendaQuery = { cpfDigits };
+      agendaSelectedDate = null;
+      renderAgendaResultado();
+    };
+  }
+  renderAgendaResultado();
+}
+
+function renderAgendaResultado(){
+  const box = document.getElementById('agenda-resultado');
+  if(!box) return;
+  if(!agendaQuery){ box.innerHTML = ''; return; }
+  const { porDia, temOrdinariaNoMes } = agendaCalcularMes(agendaQuery.cpfDigits);
+  const hoje = new Date();
+  const mesNomeRaw = MESES_PT[hoje.getMonth()];
+  const mesLabel = mesNomeRaw.charAt(0)+mesNomeRaw.slice(1).toLowerCase()+'/'+hoje.getFullYear();
+
+  let html = '<div class="refresh-row"><span class="muted-sm">'+escapeHtml(mesLabel)+'</span></div>';
+  if(!temOrdinariaNoMes){
+    html += '<div class="muted-sm" style="margin-bottom:10px;color:var(--amber);">Escala ordinária não localizada para este CPF — exibindo apenas serviço extra.</div>';
+  }
+  html += '<div class="card">'
+    + '<div class="agenda-weekdays">' + DOW.map(d=>'<span>'+d+'</span>').join('') + '</div>'
+    + '<div class="agenda-grid">' + agendaGridCellsHtml(porDia) + '</div>'
+    + '<div class="muted-sm" style="margin-top:12px;display:flex;gap:16px;flex-wrap:wrap;">'
+    + '<span><span class="dot ordinaria" style="display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--blue);vertical-align:middle;margin-right:5px;"></span>Serviço ordinário</span>'
+    + '<span><span class="dot extra" style="display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--amber);vertical-align:middle;margin-right:5px;"></span>Serviço extra</span>'
+    + '</div>'
+    + '</div>';
+  if(agendaSelectedDate && porDia[agendaSelectedDate]){
+    html += agendaDetalheHtml(agendaSelectedDate, porDia[agendaSelectedDate]);
+  }
+  box.innerHTML = html;
+}
+
+// Grade de 7 colunas do mês, com células vazias (.agenda-cell.empty) antes do
+// dia 1 e depois do último dia, alinhando os dias reais sob o cabeçalho de
+// dias da semana (DOW, mesmo array de fmtDateParts). Em telas largas cada
+// célula mostra o texto do(s) bloco(s) (.agenda-blocks); em telas estreitas o
+// CSS troca isso por indicadores compactos (.agenda-dots) — ver media query.
+function agendaGridCellsHtml(porDia){
+  const dias = agendaDiasDoMes();
+  const primeiraData = parseDateStr(dias[0]);
+  const primeiroDow = new Date(primeiraData.y, primeiraData.m-1, primeiraData.d).getDay();
+  let html = '';
+  for(let i=0;i<primeiroDow;i++) html += '<div class="agenda-cell empty"></div>';
+  for(const dateStr of dias){
+    const info = porDia[dateStr] || { turno:null, extras:[] };
+    const p = parseDateStr(dateStr);
+    const temOrdinaria = !!info.turno;
+    const temExtra = info.extras.length > 0;
+    const selected = dateStr === agendaSelectedDate;
+    let blocksHtml = '';
+    if(temOrdinaria) blocksHtml += '<div class="agenda-block ordinaria">'+TURNO_LABEL[info.turno]+' '+(info.turno==='dia'?'06–18':'18–06')+'</div>';
+    info.extras.forEach(s=>{ blocksHtml += '<div class="agenda-block extra">Extra '+(s.startTime||'--:--')+'</div>'; });
+    let dotsHtml = '';
+    if(temOrdinaria) dotsHtml += '<span class="dot ordinaria"></span>';
+    if(temExtra) dotsHtml += '<span class="dot extra"></span>';
+    html += '<div class="agenda-cell'+(selected?' selected':'')+'" onclick="toggleAgendaDay(\''+dateStr+'\')">'
+      + '<div class="agenda-daynum">'+p.d+'</div>'
+      + '<div class="agenda-blocks">'+blocksHtml+'</div>'
+      + '<div class="agenda-dots">'+dotsHtml+'</div>'
+      + '</div>';
+  }
+  const totalCells = primeiroDow + dias.length;
+  const trailing = (7 - (totalCells % 7)) % 7;
+  for(let i=0;i<trailing;i++) html += '<div class="agenda-cell empty"></div>';
+  return html;
+}
+
+// Alterna o dia selecionado (clique de novo no mesmo dia fecha o detalhe) e
+// reexibe só o bloco de resultado — é a "expansão inline" que mostra o texto
+// completo do turno/vaga extra em telas estreitas, ver renderAgendaResultado.
+function toggleAgendaDay(dateStr){
+  agendaSelectedDate = (agendaSelectedDate === dateStr) ? null : dateStr;
+  renderAgendaResultado();
+}
+
+function agendaDetalheHtml(dateStr, info){
+  const dp = fmtDateParts(dateStr);
+  let html = '<div class="card agenda-detail">'
+    + '<div class="section-title accent">'+dp.dow+' '+dp.dnum+'/'+dp.mon+'</div>';
+  if(info.turno){
+    html += '<div class="agenda-block ordinaria" style="display:inline-block;font-size:12px;padding:5px 10px;margin-bottom:8px;">'
+      + 'Serviço ordinário &middot; '+TURNO_LABEL[info.turno]+' ('+(info.turno==='dia'?'06:00–18:00':'18:00–06:00')+')</div>';
+  }
+  info.extras.forEach(s=>{
+    html += '<div class="agenda-block extra" style="display:block;font-size:12px;padding:6px 10px;margin-top:8px;">'
+      + 'Serviço extra &middot; '+(s.startTime||'--:--')+' – '+(s.endTime||'--:--')+(metaLine(s)?(' &middot; '+metaLine(s)):'')+'</div>';
+  });
+  if(!info.turno && !info.extras.length){
+    html += '<div class="muted-sm">Nenhum serviço (ordinário ou extra) neste dia.</div>';
+  }
+  html += '</div>';
+  return html;
+}
+
+// Descarta a consulta (e o dia selecionado) e devolve o formulário em branco.
+// Chamado a cada troca de aba, mesmo padrão de resetMeus.
+function resetAgenda(){
+  agendaQuery = null;
+  agendaSelectedDate = null;
+  const el = document.getElementById('view-agenda');
+  if(el) el.innerHTML = ''; // remove o #agenda-form; renderAgenda remonta tudo limpo
+  renderAgenda();
 }
 
 // ---------- ADMIN ----------
@@ -2657,10 +2893,10 @@ function updateLockScreen(){
 function render(){
   updateLockScreen();
   if(bloqueioTotal) return; // bloqueio prevalece sobre qualquer estado local (aba ativa, PIN validado, etc.)
-  renderVagas(); renderMeus(); renderAdmin(); refreshDatalists();
+  renderVagas(); renderMeus(); renderAgenda(); renderAdmin(); refreshDatalists();
 }
 
-const TAB_VIEWS = { vagas:'view-vagas', meus:'view-meus', admin:'view-admin' };
+const TAB_VIEWS = { vagas:'view-vagas', meus:'view-meus', agenda:'view-agenda', admin:'view-admin' };
 
 function switchTab(tab){
   activeTab = tab;
@@ -2668,13 +2904,15 @@ function switchTab(tab){
     document.getElementById('tab-'+nome).classList.toggle('active', nome === tab);
     document.getElementById(TAB_VIEWS[nome]).style.display = (nome === tab) ? 'block' : 'none';
   }
-  // Sair de "Meus Voluntariados" descarta a consulta anterior: quem voltar
-  // precisa informar o CPF de novo (ver resetMeus).
+  // Sair de "Meus Voluntariados"/"Minha Agenda" descarta a consulta anterior:
+  // quem voltar precisa informar o CPF de novo (ver resetMeus/resetAgenda).
   if(tab !== 'meus') resetMeus();
+  if(tab !== 'agenda') resetAgenda();
 }
 
 document.getElementById('tab-vagas').onclick = ()=> switchTab('vagas');
 document.getElementById('tab-meus').onclick = ()=> switchTab('meus');
+document.getElementById('tab-agenda').onclick = ()=> switchTab('agenda');
 document.getElementById('tab-admin').onclick = ()=> switchTab('admin');
 
 // Expõe as funções chamadas via onclick inline (fora do escopo do module) para o window
@@ -2700,6 +2938,7 @@ window.editPoliciaExternoCpf = editPoliciaExternoCpf;
 window.removePoliciaExterno = removePoliciaExterno;
 window.maskCpf = maskCpf; // usado inline (oninput) na máscara ao vivo do CPF na tabela de Policiais Externos
 window.toggleAdminSection = toggleAdminSection;
+window.toggleAgendaDay = toggleAgendaDay;
 
 render();
 
