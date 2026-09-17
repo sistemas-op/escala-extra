@@ -12,6 +12,7 @@
     --text:#e9eef4; --muted:#8a9bb0; --amber:#e8a33d; --amber-dim:#3a2e18;
     --green:#34d399; --green-dim:#12291f; --red:#ef5757; --red-dim:#331818;
     --blue:#5b9bd5; --blue-dim:#152838;
+    --indigo:#8d7ef0; --indigo-dim:#221f3d;
     --green-inst:#2f6b4f; --green-inst-dim:#132a20;
     --r-sm:4px; --r-md:6px; --r-pill:999px;
   }
@@ -120,11 +121,13 @@
   .agenda-daynum{font-family:'Oswald',sans-serif;font-size:13px;color:var(--text);}
   .agenda-blocks{display:flex;flex-direction:column;gap:2px;margin-top:5px;}
   .agenda-block{font-family:'JetBrains Mono',monospace;font-size:10px;padding:2px 5px;border-radius:var(--r-sm);line-height:1.4;}
-  .agenda-block.ordinaria{background:var(--blue-dim);color:var(--blue);}
+  .agenda-block.ordinaria-dia{background:var(--blue-dim);color:var(--blue);}
+  .agenda-block.ordinaria-noite{background:var(--indigo-dim);color:var(--indigo);}
   .agenda-block.extra{background:var(--amber-dim);color:var(--amber);}
   .agenda-dots{display:none;gap:4px;margin-top:6px;}
   .agenda-dots .dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;}
-  .agenda-dots .dot.ordinaria{background:var(--blue);}
+  .agenda-dots .dot.ordinaria-dia{background:var(--blue);}
+  .agenda-dots .dot.ordinaria-noite{background:var(--indigo);}
   .agenda-dots .dot.extra{background:var(--amber);}
   .agenda-detail{margin-top:14px;}
   @media (max-width:640px){
@@ -1331,17 +1334,25 @@ function renderAgendaResultado(){
   const mesNomeRaw = MESES_PT[hoje.getMonth()];
   const mesLabel = mesNomeRaw.charAt(0)+mesNomeRaw.slice(1).toLowerCase()+'/'+hoje.getFullYear();
 
-  let html = '<div class="refresh-row"><span class="muted-sm">'+escapeHtml(mesLabel)+'</span></div>';
+  // Legenda discreta no topo (não dentro do card do calendário) — as três
+  // situações (Dia/Noite/Extra) precisam ser reconhecíveis pela cor tanto
+  // aqui quanto nos blocos de texto (telas largas), pontinhos compactos
+  // (telas estreitas) e no card de detalhe (ver agendaGridCellsHtml/
+  // agendaDetalheHtml), então as três cores usadas ali são repetidas aqui.
+  const dotSpan = (cls, cor)=> '<span class="dot '+cls+'" style="display:inline-block;width:7px;height:7px;border-radius:50%;background:'+cor+';vertical-align:middle;margin-right:5px;"></span>';
+  const legendaHtml = '<div class="muted-sm" style="margin:2px 0 12px;display:flex;gap:14px;flex-wrap:wrap;">'
+    + '<span>'+dotSpan('ordinaria-dia','var(--blue)')+'Dia</span>'
+    + '<span>'+dotSpan('ordinaria-noite','var(--indigo)')+'Noite</span>'
+    + '<span>'+dotSpan('extra','var(--amber)')+'Extra</span>'
+    + '</div>';
+
+  let html = '<div class="refresh-row"><span class="muted-sm">'+escapeHtml(mesLabel)+'</span></div>' + legendaHtml;
   if(!temOrdinariaNoMes){
     html += '<div class="muted-sm" style="margin-bottom:10px;color:var(--amber);">Escala ordinária não localizada para este CPF — exibindo apenas serviço extra.</div>';
   }
   html += '<div class="card">'
     + '<div class="agenda-weekdays">' + DOW.map(d=>'<span>'+d+'</span>').join('') + '</div>'
     + '<div class="agenda-grid">' + agendaGridCellsHtml(porDia) + '</div>'
-    + '<div class="muted-sm" style="margin-top:12px;display:flex;gap:16px;flex-wrap:wrap;">'
-    + '<span><span class="dot ordinaria" style="display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--blue);vertical-align:middle;margin-right:5px;"></span>Serviço ordinário</span>'
-    + '<span><span class="dot extra" style="display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--amber);vertical-align:middle;margin-right:5px;"></span>Serviço extra</span>'
-    + '</div>'
     + '</div>';
   if(agendaSelectedDate && porDia[agendaSelectedDate]){
     html += agendaDetalheHtml(agendaSelectedDate, porDia[agendaSelectedDate]);
@@ -1367,10 +1378,10 @@ function agendaGridCellsHtml(porDia){
     const temExtra = info.extras.length > 0;
     const selected = dateStr === agendaSelectedDate;
     let blocksHtml = '';
-    if(temOrdinaria) blocksHtml += '<div class="agenda-block ordinaria">'+TURNO_LABEL[info.turno]+' '+(info.turno==='dia'?'06–18':'18–06')+'</div>';
+    if(temOrdinaria) blocksHtml += '<div class="agenda-block ordinaria-'+info.turno+'">'+TURNO_LABEL[info.turno]+' '+(info.turno==='dia'?'06–18':'18–06')+'</div>';
     info.extras.forEach(s=>{ blocksHtml += '<div class="agenda-block extra">Extra '+(s.startTime||'--:--')+'</div>'; });
     let dotsHtml = '';
-    if(temOrdinaria) dotsHtml += '<span class="dot ordinaria"></span>';
+    if(temOrdinaria) dotsHtml += '<span class="dot ordinaria-'+info.turno+'"></span>';
     if(temExtra) dotsHtml += '<span class="dot extra"></span>';
     html += '<div class="agenda-cell'+(selected?' selected':'')+'" onclick="toggleAgendaDay(\''+dateStr+'\')">'
       + '<div class="agenda-daynum">'+p.d+'</div>'
@@ -1397,7 +1408,7 @@ function agendaDetalheHtml(dateStr, info){
   let html = '<div class="card agenda-detail">'
     + '<div class="section-title accent">'+dp.dow+' '+dp.dnum+'/'+dp.mon+'</div>';
   if(info.turno){
-    html += '<div class="agenda-block ordinaria" style="display:inline-block;font-size:12px;padding:5px 10px;margin-bottom:8px;">'
+    html += '<div class="agenda-block ordinaria-'+info.turno+'" style="display:inline-block;font-size:12px;padding:5px 10px;margin-bottom:8px;">'
       + 'Serviço ordinário &middot; '+TURNO_LABEL[info.turno]+' ('+(info.turno==='dia'?'06:00–18:00':'18:00–06:00')+')</div>';
   }
   info.extras.forEach(s=>{
