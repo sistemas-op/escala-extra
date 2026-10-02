@@ -71,6 +71,7 @@
   .badge.open{background:var(--green-dim);color:var(--green);}
   .badge.full{background:var(--red-dim);color:var(--red);}
   .badge.phase{background:var(--blue-dim);color:var(--blue);font-family:'Oswald',sans-serif;font-weight:600;letter-spacing:.03em;}
+  .badge.archived{background:var(--panel-2);color:var(--muted);border:1px solid var(--border);}
   .names{margin-top:10px;font-size:13px;color:var(--muted);line-height:1.6;}
   .name-chip{display:inline-flex;align-items:center;gap:6px;background:var(--panel-2);border:1px solid var(--border);padding:3px 8px 3px 10px;border-radius:var(--r-pill);margin:2px 4px 2px 0;font-size:12.5px;}
   .btn{font-family:'Oswald',sans-serif;text-transform:uppercase;letter-spacing:.04em;font-size:12.5px;border:none;border-radius:var(--r-sm);padding:9px 13px;cursor:pointer;}
@@ -227,6 +228,12 @@ let meusQuery = null;
 // a cada render(). Chave ausente = usa o default de ADMIN_SECTION_DEFAULT_OPEN
 // (ver isAdminSectionOpen), então nenhuma seção precisa ser inicializada aqui.
 let adminSectionsOpen = {};
+// Em memória, não persistido: alterna a exibição das vagas com arquivada=true
+// dentro da lista "Vagas Cadastradas" — ver toggleShowArquivadas. Arquivar
+// nunca remove/filtra dados em nenhum outro lugar do app (Meus Voluntariados,
+// Minha Agenda, Histórico de Ações, conflito de escala, relatório do mês);
+// é só uma questão de visibilidade nesta lista administrativa.
+let showArquivadas = false;
 let periodosEscala = [];       // [{ id, vigenciaInicio:'YYYY-MM-DDTHH:mm', equipes:{A:[{funcao,patente,nome,cpf}], B:[...], C:[...], D:[...]} }, ...] — ordenado por vigenciaInicio; ver getEscalaVigente()
 let equipesImportFormOpen = false; // true enquanto o admin está importando um novo período de escala de equipes
 let calendarioOficial = null;  // { 'YYYY-MM-DD': { dia:'A', noite:'B' }, ... } — entradas EXPLÍCITAS (import/edição manual); dado único e independente dos períodos de escala
@@ -344,7 +351,7 @@ function applyRemoteData(data){
   bloqueioTotal = !!data.bloqueioTotal;
   currentPin = data.pin ?? null;
   shifts = Object.values(data.shifts || {}).map(s=>({...s}));
-  shifts.forEach(s=>{ if(!s.fase) s.fase='sgt'; });
+  shifts.forEach(s=>{ if(!s.fase) s.fase='sgt'; if(s.arquivada == null) s.arquivada = false; });
   sortShifts();
   signups = Object.values(data.signups || {}).map(s=>({...s}));
   periodosEscala = migratePeriodosEscala(data);
@@ -533,6 +540,17 @@ function fmtDateParts(dateStr){
   return { dow: DOW[dt.getDay()], dnum: String(p.d).padStart(2,'0'), mon: MON[p.m-1] };
 }
 function signupsFor(shiftId){ return signups.filter(s => s.shiftId === shiftId); }
+// Vaga "antiga"/"passada": data (estritamente) anterior a hoje, no fuso local
+// — mesmo critério usado no filtro "futuras" de renderVagas (ali com >=),
+// só que invertido. Usado tanto pelo relatório histórico (buildEscalaHistoricoBlocks)
+// quanto pelo arquivamento em lote/individual; nunca por conflito de escala
+// ou pelos relatórios do mês corrente, que não distinguem vaga antiga de nova.
+function isPastShift(s){
+  const p = parseDateStr(s && s.date);
+  if(!p) return false;
+  const today = new Date(); today.setHours(0,0,0,0);
+  return new Date(p.y, p.m-1, p.d) < today;
+}
 
 // ---------- CRUZAMENTO COM A ESCALA OFICIAL (RPA/COPOM) ----------
 
@@ -1089,6 +1107,58 @@ function applyFaseToAll(novaFase){
   });
 }
 
+// ---------- ARQUIVAMENTO DE VAGAS ANTIGAS (visibilidade apenas — nunca exclui dados) ----------
+// 'arquivada' é só uma flag de visibilidade na lista "Vagas Cadastradas" da
+// Administração (ver showArquivadas/toggleShowArquivadas). Nenhuma outra
+// leitura do app filtra por ela: Meus Voluntariados, Minha Agenda, Lixeira/
+// Histórico de Ações, conflito de escala (findEscalaConflict/findRestConflict)
+// e os relatórios (buildEscalaReportBlocks/buildEscalaHistoricoBlocks)
+// continuam considerando vagas arquivadas normalmente.
+
+function toggleShowArquivadas(){
+  showArquivadas = !showArquivadas;
+  render();
+}
+
+function archiveShift(id){
+  const s = shifts.find(x=>x.id===id);
+  if(!s || s.arquivada) return;
+  s.arquivada = true;
+  showToast('Vaga arquivada');
+  render();
+  persistShiftUpsert(s);
+}
+
+function unarchiveShift(id){
+  const s = shifts.find(x=>x.id===id);
+  if(!s || !s.arquivada) return;
+  s.arquivada = false;
+  showToast('Vaga desarquivada');
+  render();
+  persistShiftUpsert(s);
+}
+
+// Arquiva de uma vez todas as vagas com data anterior a hoje que ainda não
+// estão arquivadas. Mesmo padrão de confirmação/persistência de
+// applyFaseToAll: openConfirmModal + persistBulkUpsert só com os objetos
+// alterados (os demais shifts nem são tocados).
+function archiveAllPastShifts(){
+  const pastUnarchived = shifts.filter(s=> isPastShift(s) && !s.arquivada);
+  const total = pastUnarchived.length;
+  if(total === 0){ showToast('Nenhuma vaga antiga para arquivar'); return; }
+  openConfirmModal({
+    titulo: 'Arquivar vagas antigas?',
+    mensagem: 'Isso vai ocultar da lista principal todas as '+total+' vagas com data anterior a hoje. Elas NÃO serão excluídas e continuam acessíveis a qualquer momento clicando em \'Mostrar arquivadas\'. Deseja continuar?',
+    textoConfirmar: 'Sim, arquivar',
+    onConfirm: ()=>{
+      pastUnarchived.forEach(s=>{ s.arquivada = true; });
+      showToast(total+' vaga(s) arquivada(s).');
+      render();
+      persistBulkUpsert(pastUnarchived, []);
+    }
+  });
+}
+
 // ---------- MEUS VOLUNTARIADOS (CONSULTA PÚBLICA, SOMENTE LEITURA) ----------
 
 // Aba pública onde o próprio policial consulta o histórico completo dele.
@@ -1496,6 +1566,7 @@ function renderAdmin(){
     + '<button class="btn btn-blue btn-sm" id="demo-btn">Carregar exemplo</button>'
     + '<button class="btn btn-blue btn-sm" id="export-xlsx-btn">Gerar relatório (Excel)</button>'
     + '<button class="btn btn-blue btn-sm" id="export-docx-btn">Gerar relatório (Word)</button>'
+    + '<button class="btn btn-blue btn-sm" id="export-historico-btn">Exportar vagas antigas (Word)</button>'
     + '</div>';
 
   const hasCalendario = !!(calendarioOficial && Object.keys(calendarioOficial).length > 0);
@@ -1601,12 +1672,29 @@ function renderAdmin(){
       ).join('')
     + '</div></div>';
 
+  // --- Arquivamento em lote de vagas antigas: nunca exclui nada, só marca
+  // arquivada=true (ver archiveAllPastShifts/arquivada). Fica fora do card
+  // colapsável, no mesmo padrão da barra "Aplicar a todas as vagas" acima.
+  const pastUnarchivedCount = shifts.filter(s=> isPastShift(s) && !s.arquivada).length;
+  html += '<div class="card">'
+    + '<div class="muted-sm" style="margin-bottom:8px;">'+pastUnarchivedCount+' vaga(s) com data anterior a hoje ainda não arquivada(s). Arquivar só oculta da lista abaixo — nada é excluído.</div>'
+    + '<button class="btn btn-ghost btn-sm" onclick="archiveAllPastShifts()">Arquivar todas as vagas antigas</button>'
+    + '</div>';
+
+  const archivedCount = shifts.filter(s=>s.arquivada).length;
+  const visibleShifts = showArquivadas ? shifts : shifts.filter(s=>!s.arquivada);
+
   sectionHtml = '<div class="refresh-row"><span class="muted-sm">'+shifts.length+' vaga(s) cadastradas</span><button class="link-btn" onclick="event.stopPropagation(); refreshAll()">Atualizar</button></div>';
+  if(archivedCount > 0 || showArquivadas){
+    sectionHtml += '<div class="refresh-row" style="margin-top:-6px;"><span></span><button class="link-btn" onclick="event.stopPropagation(); toggleShowArquivadas()">'+(showArquivadas ? 'Ocultar arquivadas' : 'Mostrar arquivadas ('+archivedCount+')')+'</button></div>';
+  }
 
   if(shifts.length === 0){
     sectionHtml += '<div class="card empty">Nenhuma vaga cadastrada ainda.</div>';
+  } else if(visibleShifts.length === 0){
+    sectionHtml += '<div class="card empty">Todas as vagas estão arquivadas. Clique em "Mostrar arquivadas" acima para vê-las.</div>';
   } else {
-    for(const s of shifts){
+    for(const s of visibleShifts){
       const su = signupsFor(s.id);
       const dp = fmtDateParts(s.date);
       if(editingShiftId === s.id){
@@ -1625,11 +1713,14 @@ function renderAdmin(){
           + '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;flex-wrap:wrap;">'
           + '<div><div class="shift-time">'+dp.dnum+'/'+dp.mon+' &middot; '+s.startTime+'–'+s.endTime+'</div>'
           + (metaLine(s) ? '<div class="shift-local">'+metaLine(s)+'</div>' : '')
-          + '<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;"><span class="badge '+(su.length>=(s.vagas||0)?'full':'open')+'">'+su.length+'/'+(s.vagas||0)+'</span><span class="badge phase">'+faseLabel(s.fase)+'</span></div>'
+          + '<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;"><span class="badge '+(su.length>=(s.vagas||0)?'full':'open')+'">'+su.length+'/'+(s.vagas||0)+'</span><span class="badge phase">'+faseLabel(s.fase)+'</span>'+(s.arquivada ? '<span class="badge archived">Arquivada</span>' : '')+'</div>'
           + '</div>'
           + '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">'
           + faseQuickButtonsHtml(s)
           + '<button class="btn btn-ghost btn-sm" onclick="startEditShift(\''+s.id+'\')">Editar</button>'
+          + (s.arquivada
+              ? '<button class="btn btn-ghost btn-sm" onclick="unarchiveShift(\''+s.id+'\')">Desarquivar</button>'
+              : (isPastShift(s) ? '<button class="btn btn-ghost btn-sm" onclick="archiveShift(\''+s.id+'\')">Arquivar</button>' : ''))
           + '<button class="btn btn-danger btn-sm" onclick="deleteShift(\''+s.id+'\')">Excluir</button>'
           + '</div></div>'
           + '</div>';
@@ -1695,6 +1786,8 @@ function renderAdmin(){
   if(exportBtn){ exportBtn.onclick = exportEscalaXlsx; }
   const exportDocxBtn = el.querySelector('#export-docx-btn');
   if(exportDocxBtn){ exportDocxBtn.onclick = exportEscalaDocx; }
+  const exportHistoricoBtn = el.querySelector('#export-historico-btn');
+  if(exportHistoricoBtn){ exportHistoricoBtn.onclick = exportEscalaHistoricoDocx; }
   const addExternoBtn = el.querySelector('#add-externo-btn');
   if(addExternoBtn){ addExternoBtn.onclick = addPoliciaExterno; }
   const impEquipesOpenBtn = el.querySelector('#imp-equipes-open-btn');
@@ -1739,7 +1832,7 @@ function renderAdmin(){
         showToast('Preencha data e horários');
         return;
       }
-      const newShift = { id: uid(), date, startTime: start, endTime: end, vagas, local, viatura, fase };
+      const newShift = { id: uid(), date, startTime: start, endTime: end, vagas, local, viatura, fase, arquivada: false };
       shifts.push(newShift);
       sortShifts();
       showToast('Vaga adicionada');
@@ -2559,16 +2652,14 @@ const ESCALA_REPORT_HEADERS = ['CIDADE', 'DIA E HORÁRIO', 'VTR - Setor', 'PMs E
 // VTR-Setor repetidos apenas na 1ª linha do bloco — as demais colunas dessas
 // ficam mescladas verticalmente por quem consome este array (ver
 // exportEscalaXlsx/exportEscalaDocx).
-function buildEscalaReportBlocks(){
-  const now = new Date();
-  const anoAtual = now.getFullYear();
-  const mesAtual = now.getMonth() + 1;
-  const doMesAtual = shifts
-    .filter(s=>{ const p=parseDateStr(s && s.date); return p ? (p.y===anoAtual && p.m===mesAtual) : false; })
-    .slice()
-    .sort((a,b)=> (a.date+a.startTime).localeCompare(b.date+b.startTime));
-
-  return doMesAtual.map(s=>{
+// Converte uma lista já filtrada/ordenada de vagas para o formato de blocos
+// do modelo oficial — extraído pra ser reaproveitado tanto pelo relatório do
+// mês corrente (buildEscalaReportBlocks) quanto pelo histórico de vagas
+// antigas (buildEscalaHistoricoBlocks). Nenhum dos dois filtra por
+// 'arquivada': arquivar uma vaga é só uma questão de visibilidade na lista
+// administrativa, nunca de lógica de negócio/relatório (ver isPastShift).
+function shiftsToReportBlocks(shiftList){
+  return shiftList.map(s=>{
     const [y,m,d] = s.date.split('-');
     const dataFmt = d+'/'+m+'/'+y;
     const diaHorario = dataFmt+', '+s.startTime+'–'+s.endTime;
@@ -2578,6 +2669,43 @@ function buildEscalaReportBlocks(){
       : [''];
     return { cidade: 'Guarapuava', diaHorario, vtrSetor: s.local||'', pmLines };
   });
+}
+
+// Monta, por vaga do MÊS ATUAL (dia 1 ao último dia do mês corrente, passadas
+// e futuras — não usa o mesmo critério "data >= hoje" da tela pública), os
+// dados já no formato do modelo oficial. Mês/ano de hoje e de cada vaga são
+// comparados via parseDateStr (extração numérica direta da string
+// 'YYYY-MM-DD'), sem instanciar Date a partir de hoje para essa comparação —
+// evita qualquer risco de fuso horário deslocar o dia/mês. Cada bloco vira
+// 1+ linhas na tabela final: uma linha por voluntário (mínimo 1, mesmo sem
+// voluntário nenhum, pra vaga aparecer vazia), com Cidade/Dia e Horário/
+// VTR-Setor repetidos apenas na 1ª linha do bloco — as demais colunas dessas
+// ficam mescladas verticalmente por quem consome este array (ver
+// exportEscalaXlsx/exportEscalaDocx).
+function buildEscalaReportBlocks(){
+  const now = new Date();
+  const anoAtual = now.getFullYear();
+  const mesAtual = now.getMonth() + 1;
+  const doMesAtual = shifts
+    .filter(s=>{ const p=parseDateStr(s && s.date); return p ? (p.y===anoAtual && p.m===mesAtual) : false; })
+    .slice()
+    .sort((a,b)=> (a.date+a.startTime).localeCompare(b.date+b.startTime));
+
+  return shiftsToReportBlocks(doMesAtual);
+}
+
+// Mesmo formato de bloco, mas para TODAS as vagas com data anterior a hoje
+// (qualquer mês/ano), da mais antiga para a mais recente — usado só pelo
+// botão "Exportar vagas antigas (Word)" (ver exportEscalaHistoricoDocx).
+// Inclui vagas arquivadas normalmente: arquivar nunca retira uma vaga de
+// nenhum cálculo/relatório, só da listagem administrativa (ver isPastShift).
+function buildEscalaHistoricoBlocks(){
+  const passadas = shifts
+    .filter(isPastShift)
+    .slice()
+    .sort((a,b)=> (a.date+a.startTime).localeCompare(b.date+b.startTime));
+
+  return shiftsToReportBlocks(passadas);
 }
 
 function exportEscalaXlsx(){
@@ -2644,12 +2772,26 @@ function exportEscalaXlsx(){
 
 // ---------- EXPORTAÇÃO DA ESCALA (DOCX) ----------
 
-function exportEscalaDocx(){
-  if(!window.docx){ showToast('Biblioteca de geração de Word não carregou. Verifique sua conexão e recarregue a página.'); return; }
+// Baixa um Blob já gerado como arquivo, com o nome informado — extraído de
+// exportEscalaDocx pra ser reaproveitado por exportEscalaHistoricoDocx.
+function downloadBlob(blob, filename){
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
 
+// Monta o .docx no layout oficial (título + tabela mesclada + linha de
+// assinatura) a partir de blocks já no formato de shiftsToReportBlocks.
+// Devolve a Promise<Blob> do Packer — extraído pra ser reaproveitado tanto
+// pelo relatório do mês corrente (exportEscalaDocx) quanto pelo histórico de
+// vagas antigas (exportEscalaHistoricoDocx), sem duplicar o layout.
+function buildEscalaDocxBlob(blocks){
   const { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, VerticalMergeType, WidthType, AlignmentType } = window.docx;
-
-  const blocks = buildEscalaReportBlocks();
 
   const headerCell = (text)=> new TableCell({
     children: [new Paragraph({ children: [new TextRun({ text, bold:true })] })]
@@ -2700,22 +2842,39 @@ function exportEscalaDocx(){
     }],
   });
 
-  const today = new Date();
-  const todayStr = today.getFullYear()+'-'+String(today.getMonth()+1).padStart(2,'0')+'-'+String(today.getDate()).padStart(2,'0');
+  return Packer.toBlob(doc);
+}
 
-  Packer.toBlob(doc).then(blob=>{
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'escala-extra-'+todayStr+'.docx';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-  }).catch(e=>{
-    console.error('Erro ao gerar o Word:', e);
-    showToast('Erro ao gerar o arquivo Word.');
-  });
+function todayStrForFilename(){
+  const today = new Date();
+  return today.getFullYear()+'-'+String(today.getMonth()+1).padStart(2,'0')+'-'+String(today.getDate()).padStart(2,'0');
+}
+
+function exportEscalaDocx(){
+  if(!window.docx){ showToast('Biblioteca de geração de Word não carregou. Verifique sua conexão e recarregue a página.'); return; }
+  const blocks = buildEscalaReportBlocks();
+  buildEscalaDocxBlob(blocks)
+    .then(blob=> downloadBlob(blob, 'escala-extra-'+todayStrForFilename()+'.docx'))
+    .catch(e=>{
+      console.error('Erro ao gerar o Word:', e);
+      showToast('Erro ao gerar o arquivo Word.');
+    });
+}
+
+// Exporta TODAS as vagas com data anterior a hoje (qualquer mês), no mesmo
+// layout oficial, da mais antiga para a mais recente. Nunca gera arquivo
+// vazio: sem nenhuma vaga passada cadastrada, mostra um toast em vez de
+// baixar um .docx sem linhas (ver buildEscalaHistoricoBlocks).
+function exportEscalaHistoricoDocx(){
+  if(!window.docx){ showToast('Biblioteca de geração de Word não carregou. Verifique sua conexão e recarregue a página.'); return; }
+  const blocks = buildEscalaHistoricoBlocks();
+  if(blocks.length === 0){ showToast('Nenhuma vaga passada cadastrada.'); return; }
+  buildEscalaDocxBlob(blocks)
+    .then(blob=> downloadBlob(blob, 'escala-extra-historico-ate-'+todayStrForFilename()+'.docx'))
+    .catch(e=>{
+      console.error('Erro ao gerar o Word (histórico):', e);
+      showToast('Erro ao gerar o arquivo Word.');
+    });
 }
 
 // ---------- IMPORTAÇÃO DE VAGAS EM LOTE (colar texto, uma vaga por linha) ----------
@@ -2755,7 +2914,7 @@ function parseLoteLine(rawLine){
   if(!FASE_OPTIONS.some(o=>o.v===faseNorm)) errors.push('fase não reconhecida (use sgt, cabo, soldado, todos ou nenhum)');
 
   if(errors.length > 0) return { raw: rawLine, valid: false, error: errors.join('; ') };
-  return { raw: rawLine, valid: true, shift: { date: dateOut, startTime: startStr, endTime: endStr, local: localRaw, viatura: viaturaRaw, vagas: vagasNum, fase: faseNorm } };
+  return { raw: rawLine, valid: true, shift: { date: dateOut, startTime: startStr, endTime: endStr, local: localRaw, viatura: viaturaRaw, vagas: vagasNum, fase: faseNorm, arquivada: false } };
 }
 
 // Monta o HTML da tabela de prévia a partir do texto colado (uma linha por
@@ -2863,9 +3022,9 @@ function loadDemoData(){
       // shiftDateStr/fmtDateParts) em vez de toISOString(), que converte para UTC
       // e pode voltar a data em 1 dia em fusos atrás de UTC (ex: Brasil, UTC-3).
       const fmt = (d)=> d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
-      const s1 = { id: uid(), date: fmt(d1), startTime:'08:00', endTime:'14:00', local:'Batalhão Central', viatura:'1204', vagas:3, fase:'cabo' };
-      const s2 = { id: uid(), date: fmt(d2), startTime:'19:00', endTime:'23:00', local:'Evento - Estádio', viatura:'0817', vagas:2, fase:'soldado' };
-      const s3 = { id: uid(), date: fmt(d3), startTime:'06:00', endTime:'12:00', local:'Operação Rodovia', viatura:'', vagas:4, fase:'sgt' };
+      const s1 = { id: uid(), date: fmt(d1), startTime:'08:00', endTime:'14:00', local:'Batalhão Central', viatura:'1204', vagas:3, fase:'cabo', arquivada:false };
+      const s2 = { id: uid(), date: fmt(d2), startTime:'19:00', endTime:'23:00', local:'Evento - Estádio', viatura:'0817', vagas:2, fase:'soldado', arquivada:false };
+      const s3 = { id: uid(), date: fmt(d3), startTime:'06:00', endTime:'12:00', local:'Operação Rodovia', viatura:'', vagas:4, fase:'sgt', arquivada:false };
       shifts.push(s1, s2, s3);
       sortShifts();
       const demoSignups = [
@@ -2950,6 +3109,10 @@ window.removePoliciaExterno = removePoliciaExterno;
 window.maskCpf = maskCpf; // usado inline (oninput) na máscara ao vivo do CPF na tabela de Policiais Externos
 window.toggleAdminSection = toggleAdminSection;
 window.toggleAgendaDay = toggleAgendaDay;
+window.toggleShowArquivadas = toggleShowArquivadas;
+window.archiveShift = archiveShift;
+window.unarchiveShift = unarchiveShift;
+window.archiveAllPastShifts = archiveAllPastShifts;
 
 render();
 
