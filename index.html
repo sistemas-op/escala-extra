@@ -1103,6 +1103,92 @@ function openCancelModal(shiftId){
   };
 }
 
+// Lançamento MANUAL de voluntário pela Administração (botão "Adicionar
+// voluntário" em cada vaga de "Vagas Cadastradas", inclusive arquivadas/
+// passadas) — registra alguém que já trabalhou de fato, pra constar nos
+// relatórios. Diferente de openSignupModal, de propósito NÃO aplica nenhuma
+// trava do voluntariado público (fase da vaga, data, conflito com o serviço
+// ordinário, descanso mínimo, limite mensal de 10 extras): é lançamento
+// administrativo de um fato já ocorrido, não um novo pedido de voluntariado.
+// Mantém só as travas de integridade dos dados: nome obrigatório, CPF com 11
+// dígitos, mesmo CPF não pode entrar duas vezes na mesma vaga, e a quantidade
+// de vagas não pode ser ultrapassada (ajustar em "Editar" se precisar).
+function openAdminAddVoluntarioModal(shiftId){
+  const s = shifts.find(x=>x.id===shiftId);
+  if(!s) return;
+  const dp = fmtDateParts(s.date);
+  const bg = document.createElement('div');
+  bg.className = 'modal-bg';
+  bg.innerHTML = '<div class="modal">'
+    + '<h3>Adicionar voluntário (Administração)</h3>'
+    + '<div class="shift-local" style="margin-bottom:14px;">'+dp.dnum+'/'+dp.mon+' &middot; '+s.startTime+'–'+s.endTime+(metaLine(s)?(' &middot; '+metaLine(s)):'')+'</div>'
+    + '<form id="aa-form">'
+    + '<div class="field"><label>Nome completo</label><input id="aa-nome" placeholder="Ex: Sd Eduardo Silva"></div>'
+    + '<div class="field"><label>CPF</label><input id="aa-cpf" placeholder="000.000.000-00" maxlength="14" inputmode="numeric"></div>'
+    + '<div class="field"><label>Patente</label><select id="aa-patente">'+rankOptions(RANK_ORDER)+'</select><div id="aa-patente-note" class="muted-sm" style="margin-top:4px;display:none;"></div></div>'
+    + '<div class="modal-actions"><button type="button" class="btn btn-ghost" id="aa-cancel">Cancelar</button><button type="submit" class="btn btn-primary" id="aa-confirm">Adicionar</button></div>'
+    + '</form>'
+    + '</div>';
+  document.body.appendChild(bg);
+  const nomeInput = bg.querySelector('#aa-nome');
+  if(isDesktopViewport()) nomeInput.focus();
+  const cpfInput = bg.querySelector('#aa-cpf');
+  const patenteSelectEl = bg.querySelector('#aa-patente');
+  const patenteNoteEl = bg.querySelector('#aa-patente-note');
+
+  // Mesma busca anti-fraude usada no voluntariado público (findRankByCpfInEscalaOficial,
+  // que já cobre escala de equipes e Policiais Externos): CPF completo
+  // encontrado trava a patente real; senão, deixa o campo liberado com aviso discreto.
+  function reevaluatePatenteFromCpf(){
+    const digits = cpfInput.value.replace(/\D/g,'');
+    if(digits.length !== 11){
+      patenteSelectEl.disabled = false;
+      patenteNoteEl.style.display = 'none';
+      return;
+    }
+    const rank = findRankByCpfInEscalaOficial(digits);
+    if(rank){
+      patenteSelectEl.value = rank;
+      patenteSelectEl.disabled = true;
+      patenteNoteEl.textContent = 'Patente confirmada automaticamente pelo cadastro oficial.';
+      patenteNoteEl.style.color = 'var(--green)';
+      patenteNoteEl.style.display = '';
+    } else {
+      patenteSelectEl.disabled = false;
+      patenteNoteEl.textContent = 'CPF não localizado no cadastro oficial — selecione a patente manualmente.';
+      patenteNoteEl.style.color = 'var(--amber)';
+      patenteNoteEl.style.display = '';
+    }
+  }
+  cpfInput.oninput = ()=>{ cpfInput.value = maskCpf(cpfInput.value); reevaluatePatenteFromCpf(); };
+  cpfInput.onblur = reevaluatePatenteFromCpf;
+  bg.querySelector('#aa-cancel').onclick = ()=> bg.remove();
+  bg.querySelector('#aa-form').onsubmit = (e)=>{
+    e.preventDefault();
+    const nome = nomeInput.value.trim();
+    const patente = patenteSelectEl.value;
+    const cpfMasked = cpfInput.value.trim();
+    const cpfDigits = cpfMasked.replace(/\D/g,'');
+    if(!nome){ flagInvalid(nomeInput); showToast('Digite o nome do voluntário'); return; }
+    if(cpfDigits.length !== 11){ flagInvalid(cpfInput); showToast('Digite um CPF válido'); return; }
+    const freshShift = shifts.find(x=>x.id===shiftId);
+    if(!freshShift){ showToast('Vaga não encontrada'); bg.remove(); return; }
+    const su = signupsFor(shiftId);
+    if(su.some(x=> (x.cpf||'').replace(/\D/g,'') === cpfDigits)){ flagInvalid(cpfInput); showToast('Este CPF já está lançado nesta vaga'); return; }
+    // Única trava de capacidade mantida neste fluxo administrativo: a
+    // quantidade de vagas não pode ser ultrapassada.
+    if(su.length >= freshShift.vagas){ showToast('Vaga sem capacidade sobrando. Ajuste a quantidade de vagas em "Editar" antes de adicionar.'); return; }
+    // Checado antes de fechar o modal para não perder o que foi digitado.
+    if(!servidorCarregado){ showToast(MSG_SEM_SERVIDOR); return; }
+    const entry = { id: uid(), shiftId, nome, patente, cpf: cpfMasked, timestamp: new Date().toISOString(), origemAdmin: true };
+    signups.push(entry);
+    bg.remove();
+    showToast('Voluntário adicionado pela Administração');
+    render();
+    persistSignupUpsert(entry);
+  };
+}
+
 function removeSignup(id){
   signups = signups.filter(x=>x.id!==id);
   render();
@@ -1765,6 +1851,7 @@ function renderAdmin(){
           + '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">'
           + faseQuickButtonsHtml(s)
           + '<button class="btn btn-ghost btn-sm" onclick="startEditShift(\''+s.id+'\')">Editar</button>'
+          + '<button class="btn btn-ghost btn-sm" onclick="openAdminAddVoluntarioModal(\''+s.id+'\')">Adicionar voluntário</button>'
           + (s.arquivada
               ? '<button class="btn btn-ghost btn-sm" onclick="unarchiveShift(\''+s.id+'\')">Desarquivar</button>'
               : (isPastShift(s) ? '<button class="btn btn-ghost btn-sm" onclick="archiveShift(\''+s.id+'\')">Arquivar</button>' : ''))
@@ -1793,7 +1880,7 @@ function renderAdmin(){
       const dp = fmtDateParts(s.date);
       sectionHtml += '<tr>'
         + '<td>'+dp.dnum+'/'+dp.mon+' '+s.startTime+'</td>'
-        + '<td><input value="'+escapeHtml(su.nome)+'" onchange="editSignupName(\''+su.id+'\', this.value)"></td>'
+        + '<td><input value="'+escapeHtml(su.nome)+'" onchange="editSignupName(\''+su.id+'\', this.value)">'+(su.origemAdmin ? '<div class="muted-sm" style="margin-top:2px;">Lançado pela Administração</div>' : '')+'</td>'
         + '<td><select onchange="editSignupPatente(\''+su.id+'\', this.value)">'
           + RANK_ORDER.map(r=>'<option value="'+r+'" '+(r===su.patente?'selected':'')+'>'+RANK_LABEL[r]+'</option>').join('')
           + '</select></td>'
