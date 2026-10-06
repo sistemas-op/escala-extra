@@ -211,6 +211,18 @@ if(window.pdfjsLib){
 let shifts = [];
 let signups = [];
 let bloqueioTotal = false; // só é alterado via campo 'bloqueioTotal' no Firestore (console do Firebase) — nunca por UI
+// Só vira true depois do primeiro snapshot vindo de fato do SERVIDOR
+// (snap.metadata.fromCache === false). Enquanto for false, o estado em memória
+// pode ser só o cache local vazio de um aparelho sem conexão, e qualquer
+// gravação feita a partir dele pode sobrescrever dados reais quando a conexão
+// voltar — por isso todas as funções persist* recusam gravar até lá (ver
+// bloqueiaGravacaoSemServidor). Nunca volta a ser false: depois de sincronizar
+// uma vez, o cache em memória já contém o documento completo.
+let servidorCarregado = false;
+// Cópia do último estado aplicado (remoto) — usada para desfazer a alteração
+// otimista feita em memória quando uma gravação é recusada por falta de servidor.
+let ultimoEstadoRemoto = {};
+const MSG_SEM_SERVIDOR = 'Sem conexão com o servidor. Tente novamente em instantes.';
 let adminUnlocked = false;
 let currentPin = null;
 let editingShiftId = null;
@@ -348,6 +360,7 @@ function applyRemoteData(data){
   // Checado antes de qualquer outro campo: se o bloqueio total estiver
   // ativo, render() vai curto-circuitar e nada mais do estado remoto
   // (pin, vagas, etc.) chega a ser exibido nesta passada.
+  ultimoEstadoRemoto = JSON.parse(JSON.stringify(data));
   bloqueioTotal = !!data.bloqueioTotal;
   currentPin = data.pin ?? null;
   shifts = Object.values(data.shifts || {}).map(s=>({...s}));
@@ -381,14 +394,33 @@ function handlePersistError(e){
   showToast('Erro ao sincronizar com o servidor');
 }
 
+// Trava de segurança chamada no início de TODA função persist*: se ainda não
+// houve nenhum snapshot vindo do servidor (ver servidorCarregado), recusa a
+// gravação, avisa o usuário e desfaz em memória a alteração otimista que o
+// chamador já tinha aplicado (reaplicando o último estado remoto conhecido).
+// Devolve true quando a gravação deve ser abortada.
+function bloqueiaGravacaoSemServidor(){
+  if(servidorCarregado) return false;
+  showToast(MSG_SEM_SERVIDOR);
+  applyRemoteData(JSON.parse(JSON.stringify(ultimoEstadoRemoto)));
+  render();
+  return true;
+}
+
 // Grava/atualiza campos de nível superior (ex: pin) preservando os demais.
+// Também é o que CRIA o documento num projeto Firebase novo (setDoc com
+// merge cria o documento se ele não existir) — por isso nenhum chamador pode
+// passar mapas vazios ou pin:null aqui: num merge, um mapa vazio substitui o
+// mapa inteiro já gravado (ver attachRealtimeListener).
 function persist(patch){
+  if(bloqueiaGravacaoSemServidor()) return;
   setDoc(docRef, patch, { merge: true }).catch(handlePersistError);
 }
 
 // Upsert/delete granulares: tocam só a chave do item alterado dentro do
 // mapa shifts/signups, sem substituir o mapa inteiro.
 function persistShiftUpsert(shift){
+  if(bloqueiaGravacaoSemServidor()) return;
   setDoc(docRef, { shifts: { [shift.id]: shift } }, { merge: true }).catch(handlePersistError);
 }
 // newLixeira (opcional) é gravado junto, no mesmo patch — garante que a
@@ -396,6 +428,7 @@ function persistShiftUpsert(shift){
 // escrita (sem risco de a vaga sumir sem que a cópia de segurança tenha sido
 // salva antes).
 function persistShiftDelete(id, cascadeSignupIds, newLixeira){
+  if(bloqueiaGravacaoSemServidor()) return;
   const patch = { shifts: { [id]: deleteField() } };
   if(cascadeSignupIds && cascadeSignupIds.length){
     patch.signups = {};
@@ -405,13 +438,16 @@ function persistShiftDelete(id, cascadeSignupIds, newLixeira){
   setDoc(docRef, patch, { merge: true }).catch(handlePersistError);
 }
 function persistSignupUpsert(su){
+  if(bloqueiaGravacaoSemServidor()) return;
   setDoc(docRef, { signups: { [su.id]: su } }, { merge: true }).catch(handlePersistError);
 }
 function persistSignupDelete(id){
+  if(bloqueiaGravacaoSemServidor()) return;
   setDoc(docRef, { signups: { [id]: deleteField() } }, { merge: true }).catch(handlePersistError);
 }
 // Bulk upsert (ex: dados de exemplo): mescla várias chaves novas de uma vez.
 function persistBulkUpsert(newShifts, newSignups){
+  if(bloqueiaGravacaoSemServidor()) return;
   const patch = {};
   if(newShifts && newShifts.length){ patch.shifts = {}; newShifts.forEach(s=>{ patch.shifts[s.id] = s; }); }
   if(newSignups && newSignups.length){ patch.signups = {}; newSignups.forEach(su=>{ patch.signups[su.id] = su; }); }
@@ -488,12 +524,14 @@ function restaurarLixeira(id){
 // elemento a elemento — cada chamada já reflete o array completo e atualizado
 // em memória, incluindo períodos antigos preservados).
 function persistPeriodosEscala(list){
+  if(bloqueiaGravacaoSemServidor()) return;
   updateDoc(docRef, { periodosEscala: list }).catch(handlePersistError);
 }
 
 // Mesmo padrão de persistPeriodosEscala: array pequeno, gerido só pela
 // Administração — grava por inteiro a cada alteração.
 function persistPoliciaisExternos(list){
+  if(bloqueiaGravacaoSemServidor()) return;
   updateDoc(docRef, { policiaisExternos: list }).catch(handlePersistError);
 }
 
@@ -508,6 +546,7 @@ function persistPoliciaisExternos(list){
 // apagado (deleteField) em vez de deixar um ciclo antigo e potencialmente
 // inválido para os novos dados.
 function persistCalendarioOficial(calendar, ciclo){
+  if(bloqueiaGravacaoSemServidor()) return;
   const patch = { calendarioOficial: calendar, cicloEscala: ciclo || deleteField() };
   updateDoc(docRef, patch).catch(handlePersistError);
 }
@@ -515,6 +554,7 @@ function persistCalendarioOficial(calendar, ciclo){
 async function refreshAll(){
   try{
     const snap = await getDoc(docRef);
+    if(!snap.metadata.fromCache) servidorCarregado = true;
     if(snap.exists()) applyRemoteData(snap.data());
   }catch(e){}
   render();
@@ -1002,6 +1042,8 @@ function openSignupModal(shiftId){
       showToast('Limite de 10 extras no mês atingido para este CPF.');
       return;
     }
+    // Checado antes de fechar o modal para não perder o que foi digitado.
+    if(!servidorCarregado){ showToast(MSG_SEM_SERVIDOR); return; }
     const entry = { id: uid(), shiftId, nome, patente, cpf: cpfMasked, timestamp: new Date().toISOString() };
     signups.push(entry);
     bg.remove();
@@ -1554,7 +1596,12 @@ function renderAdmin(){
       const val = pinInput.value.trim();
       if(!val){ flagInvalid(pinInput); showToast('Digite um PIN'); return; }
       if(!currentPin){
+        // Sem snapshot do servidor, "sem PIN" pode ser só o cache vazio de um
+        // aparelho offline — nunca desbloqueia nem grava nesse estado.
+        if(!servidorCarregado){ showToast(MSG_SEM_SERVIDOR); return; }
         currentPin = val; adminUnlocked = true; showToast('PIN definido'); render();
+        // Num projeto novo (documento ainda inexistente) é esta gravação que
+        // cria o documento — só com o campo pin preenchido, nada mais.
         persist({ pin: val });
       } else if(val === currentPin){ adminUnlocked = true; render(); }
       else { flagInvalid(pinInput); showToast('PIN incorreto'); }
@@ -2561,6 +2608,9 @@ function openCalendarPreviewModal(calendar, calendarFallback){
       if(!finalCalendar[dateStr]) finalCalendar[dateStr] = { dia:'', noite:'' };
       finalCalendar[dateStr][field] = input.value.trim().toUpperCase();
     });
+    // persistCalendarioOficial usa updateDoc, que SUBSTITUI o campo inteiro:
+    // salvar um calendário sem nenhuma data apagaria o calendário já gravado.
+    if(Object.keys(finalCalendar).length === 0){ showToast('Calendário sem nenhuma data — nada foi salvo.'); return; }
 
     const finalCiclo = detectCiclo(finalCalendar);
     calendarioOficial = finalCalendar;
@@ -2900,7 +2950,11 @@ function parseLoteLine(rawLine){
     errors.push('data inválida (use DD/MM/AAAA)');
   } else {
     const d = parseInt(dm[1],10), m = parseInt(dm[2],10), y = parseInt(dm[3],10);
+    // new Date "transborda" datas inexistentes (31/02 vira 03/03); se algum
+    // componente mudar, a data não existe no calendário.
+    const dt = new Date(y, m-1, d);
     if(d < 1 || d > 31 || m < 1 || m > 12) errors.push('data inválida (use DD/MM/AAAA)');
+    else if(dt.getFullYear() !== y || dt.getMonth() !== m-1 || dt.getDate() !== d) errors.push('data inexistente (ex: 31/02 ou 29/02 fora de ano bissexto)');
     else dateOut = y+'-'+String(m).padStart(2,'0')+'-'+String(d).padStart(2,'0');
   }
 
@@ -2978,6 +3032,8 @@ function openLoteImportModal(){
   bg.querySelector('#lote-cancel').onclick = ()=> bg.remove();
   confirmBtn.onclick = ()=>{
     if(lastResult.validCount === 0) return;
+    // Checado antes de fechar o modal para não perder o texto colado.
+    if(!servidorCarregado){ showToast(MSG_SEM_SERVIDOR); return; }
     const newShifts = lastResult.validShifts.map(s=> ({ id: uid(), ...s }));
     shifts.push(...newShifts);
     sortShifts();
@@ -3117,16 +3173,35 @@ window.archiveAllPastShifts = archiveAllPastShifts;
 render();
 
 let unsubscribeRealtime = null;
+let ultimoJsonSnapshot = null; // ver comentário sobre includeMetadataChanges abaixo
 
+// POR QUE NÃO HÁ MAIS GRAVAÇÃO NA INICIALIZAÇÃO: antes, quando
+// !snap.exists(), este listener gravava
+//   setDoc(docRef, { pin:null, shifts:{}, signups:{}, bloqueioTotal:false }, { merge:true })
+// para "criar" o documento. Só que um aparelho que abre o app SEM conexão
+// recebe um snapshot do cache local vazio, com exists() === false, mesmo que
+// o documento exista no servidor. E, num setDoc com merge, um mapa vazio NÃO
+// é mesclado: ele SUBSTITUI o mapa inteiro. A gravação ficava na fila offline
+// e, quando a conexão voltava, zerava shifts, signups e pin para todo mundo —
+// causa provável dos sumiços de todas as vagas. Agora documento inexistente é
+// tratado só em memória (estado vazio) e nada é gravado aqui; o documento de
+// um projeto novo é criado pela primeira definição de PIN (persist({pin})).
+//
+// includeMetadataChanges: sem isso, se o primeiro snapshot vier do cache e o
+// servidor confirmar exatamente os mesmos dados, o SDK não avisa de novo e
+// servidorCarregado nunca viraria true. Com isso, o listener também dispara
+// em mudanças só de metadados — nesses casos (dados iguais ao último
+// snapshot) não reaplicamos nem re-renderizamos, para não resetar formulários.
 function attachRealtimeListener(){
   if(unsubscribeRealtime) return; // já anexado — nunca duplica o listener
-  unsubscribeRealtime = onSnapshot(docRef, (snap)=>{
+  unsubscribeRealtime = onSnapshot(docRef, { includeMetadataChanges: true }, (snap)=>{
     try{
-      if(!snap.exists()){
-        setDoc(docRef, { pin: null, shifts: {}, signups: {}, bloqueioTotal: false }, { merge: true }).catch(e=>console.error(e));
-        return; // o próprio setDoc acima vai disparar este listener de novo
-      }
-      applyRemoteData(snap.data());
+      if(!snap.metadata.fromCache) servidorCarregado = true;
+      const data = snap.exists() ? snap.data() : {}; // inexistente = estado vazio, só em memória
+      const json = JSON.stringify(data);
+      if(json === ultimoJsonSnapshot) return; // só mudaram metadados
+      ultimoJsonSnapshot = json;
+      applyRemoteData(data);
       render();
     }catch(e){
       console.error('Erro ao processar atualização em tempo real:', e);
