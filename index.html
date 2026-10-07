@@ -1114,8 +1114,9 @@ function openCancelModal(shiftId){
 // dígitos, mesmo CPF não pode entrar duas vezes na mesma vaga, e a quantidade
 // de vagas não pode ser ultrapassada (ajustar em "Editar" se precisar).
 function openAdminAddVoluntarioModal(shiftId){
+  try{
   const s = shifts.find(x=>x.id===shiftId);
-  if(!s) return;
+  if(!s){ showToast('Vaga não encontrada'); return; }
   const dp = fmtDateParts(s.date);
   const bg = document.createElement('div');
   bg.className = 'modal-bg';
@@ -1165,28 +1166,37 @@ function openAdminAddVoluntarioModal(shiftId){
   bg.querySelector('#aa-cancel').onclick = ()=> bg.remove();
   bg.querySelector('#aa-form').onsubmit = (e)=>{
     e.preventDefault();
-    const nome = nomeInput.value.trim();
-    const patente = patenteSelectEl.value;
-    const cpfMasked = cpfInput.value.trim();
-    const cpfDigits = cpfMasked.replace(/\D/g,'');
-    if(!nome){ flagInvalid(nomeInput); showToast('Digite o nome do voluntário'); return; }
-    if(cpfDigits.length !== 11){ flagInvalid(cpfInput); showToast('Digite um CPF válido'); return; }
-    const freshShift = shifts.find(x=>x.id===shiftId);
-    if(!freshShift){ showToast('Vaga não encontrada'); bg.remove(); return; }
-    const su = signupsFor(shiftId);
-    if(su.some(x=> (x.cpf||'').replace(/\D/g,'') === cpfDigits)){ flagInvalid(cpfInput); showToast('Este CPF já está lançado nesta vaga'); return; }
-    // Única trava de capacidade mantida neste fluxo administrativo: a
-    // quantidade de vagas não pode ser ultrapassada.
-    if(su.length >= freshShift.vagas){ showToast('Vaga sem capacidade sobrando. Ajuste a quantidade de vagas em "Editar" antes de adicionar.'); return; }
-    // Checado antes de fechar o modal para não perder o que foi digitado.
-    if(!servidorCarregado){ showToast(MSG_SEM_SERVIDOR); return; }
-    const entry = { id: uid(), shiftId, nome, patente, cpf: cpfMasked, timestamp: new Date().toISOString(), origemAdmin: true };
-    signups.push(entry);
-    bg.remove();
-    showToast('Voluntário adicionado pela Administração');
-    render();
-    persistSignupUpsert(entry);
+    try{
+      const nome = nomeInput.value.trim();
+      const patente = patenteSelectEl.value;
+      const cpfMasked = cpfInput.value.trim();
+      const cpfDigits = cpfMasked.replace(/\D/g,'');
+      if(!nome){ flagInvalid(nomeInput); showToast('Digite o nome do voluntário'); return; }
+      if(cpfDigits.length !== 11){ flagInvalid(cpfInput); showToast('Digite um CPF válido'); return; }
+      const freshShift = shifts.find(x=>x.id===shiftId);
+      if(!freshShift){ showToast('Vaga não encontrada'); bg.remove(); return; }
+      const su = signupsFor(shiftId);
+      if(su.some(x=> (x.cpf||'').replace(/\D/g,'') === cpfDigits)){ flagInvalid(cpfInput); showToast('Este CPF já está lançado nesta vaga'); return; }
+      // Única trava de capacidade mantida neste fluxo administrativo: a
+      // quantidade de vagas não pode ser ultrapassada.
+      if(su.length >= freshShift.vagas){ showToast('Vaga sem capacidade sobrando. Ajuste a quantidade de vagas em "Editar" antes de adicionar.'); return; }
+      // Checado antes de fechar o modal para não perder o que foi digitado.
+      if(!servidorCarregado){ showToast(MSG_SEM_SERVIDOR); return; }
+      const entry = { id: uid(), shiftId, nome, patente, cpf: cpfMasked, timestamp: new Date().toISOString(), origemAdmin: true };
+      signups.push(entry);
+      bg.remove();
+      showToast('Voluntário adicionado pela Administração');
+      render();
+      persistSignupUpsert(entry);
+    }catch(err){
+      console.error('Erro ao adicionar voluntário pela Administração', err);
+      showToast('Erro ao adicionar voluntário: '+(err && err.message ? err.message : 'erro inesperado'));
+    }
   };
+  }catch(err){
+    console.error('Erro ao abrir o formulário de adicionar voluntário', err);
+    showToast('Erro ao abrir o formulário: '+(err && err.message ? err.message : 'erro inesperado'));
+  }
 }
 
 function removeSignup(id){
@@ -3256,6 +3266,7 @@ window.toggleShowArquivadas = toggleShowArquivadas;
 window.archiveShift = archiveShift;
 window.unarchiveShift = unarchiveShift;
 window.archiveAllPastShifts = archiveAllPastShifts;
+window.openAdminAddVoluntarioModal = openAdminAddVoluntarioModal;
 
 render();
 
