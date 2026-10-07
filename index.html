@@ -113,6 +113,7 @@
   .rank-tag.sgt{color:var(--amber);}
   .rank-tag.cabo{color:var(--blue);}
   .rank-tag.soldado{color:var(--green);}
+  .rank-tag.aspirante{color:var(--green);}
   .agenda-weekdays{display:grid;grid-template-columns:repeat(7,1fr);gap:6px;margin-bottom:6px;}
   .agenda-weekdays span{text-align:center;font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.06em;color:var(--muted);text-transform:uppercase;}
   .agenda-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:6px;}
@@ -255,9 +256,13 @@ let lixeira = [];              // [{ id, timestamp:ISO, tipo:'apagar_tudo'|'excl
 let policiaisExternos = [];    // [{ id, nome, patente:'sgt'|'cabo'|'soldado', cpf }] — policiais de outras unidades sem escala normal aqui; usado só pra confirmar patente no voluntariado (findRankByCpfInEscalaOficial), nunca em findEscalaConflict/findRestConflict
 const LIXEIRA_MAX = 20;        // entradas mais antigas além desse limite são descartadas ao adicionar uma nova
 
-const RANK_ORDER = ['sgt','cabo','soldado'];
-const RANK_LABEL = {sgt:'Sargento', cabo:'Cabo', soldado:'Soldado'};
-const RANK_ABBR = {sgt:'Sgt.', cabo:'Cb.', soldado:'Sd.'}; // usado no relatório oficial (coluna "PMs ESCALADO")
+// 'aspirante' é um posto DISTINTO de 'soldado' (preserva inscrições antigas
+// gravadas como 'soldado' sem ambiguidade e permite abreviação própria nos
+// relatórios — ver RANK_ABBR), mas tratado no MESMO NÍVEL de soldado em toda
+// checagem de liberação por fase (ver allowedRanks).
+const RANK_ORDER = ['sgt','cabo','soldado','aspirante'];
+const RANK_LABEL = {sgt:'Sargento', cabo:'Cabo', soldado:'Soldado', aspirante:'Aspirante'};
+const RANK_ABBR = {sgt:'Sgt.', cabo:'Cb.', soldado:'Sd.', aspirante:'Asp.'}; // usado no relatório oficial (coluna "PMs ESCALADO")
 const TEAM_LETTERS = ['A','B','C','D'];
 const TURNO_LABEL = { dia: 'Dia', noite: 'Noite' };
 
@@ -265,17 +270,20 @@ const TURNO_LABEL = { dia: 'Dia', noite: 'Noite' };
 // 'sgt'/'cabo'/'soldado' liberam só aquela patente; 'todos' libera as três;
 // 'nenhum' fecha a vaga por completo (nenhuma patente pode se voluntariar) —
 // ver allowedRanks.
+// Rótulos "soldado" trocados para "Soldados/Aspirantes" (e abreviação
+// "Sd/Asp") — é só texto exibido; o VALOR gravado da fase continua 'soldado'
+// (ver allowedRanks, que já trata Aspirante no mesmo nível de Soldado).
 const FASE_OPTIONS = [
   { v:'sgt', label:'Somente Sargentos' },
   { v:'cabo', label:'Somente Cabos' },
-  { v:'soldado', label:'Somente Soldados' },
-  { v:'todos', label:'Todos (Sgt, Cabo, Sd)' },
+  { v:'soldado', label:'Somente Soldados/Aspirantes' },
+  { v:'todos', label:'Todos (Sgt, Cabo, Sd/Asp)' },
   { v:'nenhum', label:'Fechada (ninguém pode se voluntariar)' }
 ];
-const FASE_LABEL = { sgt:'Somente Sargentos', cabo:'Somente Cabos', soldado:'Somente Soldados', todos:'Todos os postos/graduações', nenhum:'Fechada temporariamente' };
+const FASE_LABEL = { sgt:'Somente Sargentos', cabo:'Somente Cabos', soldado:'Somente Soldados/Aspirantes', todos:'Todos os postos/graduações', nenhum:'Fechada temporariamente' };
 // Rótulo curto usado nos botões de atalho de fase (por vaga e em lote) —
 // mesmo texto em ambos os lugares para não confundir o admin.
-const FASE_SHORT_LABEL = { sgt:'Sgt', cabo:'Cabo', soldado:'Sd', todos:'Todos', nenhum:'Fechada' };
+const FASE_SHORT_LABEL = { sgt:'Sgt', cabo:'Cabo', soldado:'Sd/Asp', todos:'Todos', nenhum:'Fechada' };
 function faseShortLabel(fase){ return FASE_SHORT_LABEL[fase] || fase; }
 
 function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,8); }
@@ -302,9 +310,13 @@ function flagInvalid(el){
   el.addEventListener('input', clear, { once:true });
   el.addEventListener('change', clear, { once:true });
 }
+// Aspirante é tratado no MESMO NÍVEL de Soldado em toda liberação por fase:
+// sempre que 'soldado' está liberado (fase 'soldado' ou 'todos'), 'aspirante'
+// também está; sempre que 'soldado' está bloqueado, 'aspirante' também está.
 function allowedRanks(fase){
-  if(fase === 'todos') return ['sgt','cabo','soldado'];
-  if(fase === 'sgt' || fase === 'cabo' || fase === 'soldado') return [fase];
+  if(fase === 'todos') return ['sgt','cabo','soldado','aspirante'];
+  if(fase === 'soldado') return ['soldado','aspirante'];
+  if(fase === 'sgt' || fase === 'cabo') return [fase];
   if(fase === 'nenhum') return []; // fechada: nenhuma patente pode se voluntariar
   return ['sgt']; // fallback defensivo para valor de fase ausente/inesperado
 }
@@ -619,16 +631,18 @@ function cpfMatchesMasked(inputDigits, storedCpfRaw){
   return true;
 }
 
-// Deduz a categoria de patente (mesmo domínio de RANK_ORDER: sgt/cabo/soldado)
-// a partir do texto livre de patente vindo da escala oficial importada (ex:
-// "3º Sgt", "Cb", "Sd", "Sargento") — usado só pra travar o campo de patente
-// no voluntariado (ver findRankByCpfInEscalaOficial). Retorna null quando o
-// texto não bate com nenhuma das 3 categorias conhecidas pelo app (ex: um
-// oficial, ou patente vazia/não reconhecida).
+// Deduz a categoria de patente (mesmo domínio de RANK_ORDER: sgt/cabo/soldado/
+// aspirante) a partir do texto livre de patente vindo da escala oficial
+// importada (ex: "3º Sgt", "Cb", "Sd", "Sargento", "Asp", "Aspirante") —
+// usado só pra travar o campo de patente no voluntariado (ver
+// findRankByCpfInEscalaOficial). Retorna null quando o texto não bate com
+// nenhuma das 4 categorias conhecidas pelo app (ex: um oficial, ou patente
+// vazia/não reconhecida).
 function inferRankFromPatenteTexto(patenteRaw){
   const t = (patenteRaw||'').normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase();
   if(/\bsgt\b|sargento/.test(t)) return 'sgt';
   if(/\bcb\b|cabo/.test(t)) return 'cabo';
+  if(/\basp\b|aspirante/.test(t)) return 'aspirante';
   if(/\bsd\b|soldado/.test(t)) return 'soldado';
   return null;
 }
@@ -3061,7 +3075,12 @@ function parseLoteLine(rawLine){
   const vagasNum = parseInt(vagasStr, 10);
   if(!/^\d+$/.test(vagasStr) || vagasNum < 1) errors.push('quantidade de vagas inválida (use um número inteiro ≥ 1)');
 
-  const faseNorm = faseRaw.toLowerCase();
+  // Sinônimos aceitos na coluna Fase que equivalem à fase 'soldado' (Aspirante
+  // é liberado no mesmo momento que Soldado — ver allowedRanks); os valores já
+  // aceitos antes (sgt, cabo, soldado, todos, nenhum) continuam funcionando.
+  const FASE_ALIASES = { 'sd/asp':'soldado', 'asp':'soldado', 'soldados/aspirantes':'soldado' };
+  const faseRawNorm = faseRaw.toLowerCase();
+  const faseNorm = FASE_ALIASES[faseRawNorm] || faseRawNorm;
   if(!FASE_OPTIONS.some(o=>o.v===faseNorm)) errors.push('fase não reconhecida (use sgt, cabo, soldado, todos ou nenhum)');
 
   if(errors.length > 0) return { raw: rawLine, valid: false, error: errors.join('; ') };
@@ -3105,7 +3124,7 @@ function openLoteImportModal(){
   bg.className = 'modal-bg';
   bg.innerHTML = '<div class="modal" style="max-width:640px;">'
     + '<h3>Importar vagas em lote</h3>'
-    + '<div class="muted-sm" style="margin-bottom:8px;">Cole uma vaga por linha, no formato: <span style="font-family:\'JetBrains Mono\',monospace;">DD/MM/AAAA;HH:MM;HH:MM;Local;Viatura;Vagas;Fase</span>. Fase pode ser <b>sgt</b>, <b>cabo</b>, <b>soldado</b> ou <b>todos</b>. Local e Viatura podem ficar vazios entre os pontos e vírgulas. Nenhum voluntário é criado — só as vagas.</div>'
+    + '<div class="muted-sm" style="margin-bottom:8px;">Cole uma vaga por linha, no formato: <span style="font-family:\'JetBrains Mono\',monospace;">DD/MM/AAAA;HH:MM;HH:MM;Local;Viatura;Vagas;Fase</span>. Fase pode ser <b>sgt</b>, <b>cabo</b>, <b>soldado</b> (também aceita <b>sd/asp</b> ou <b>soldados/aspirantes</b>), <b>asp</b> (equivalente a soldado) ou <b>todos</b>. Local e Viatura podem ficar vazios entre os pontos e vírgulas. Nenhum voluntário é criado — só as vagas.</div>'
     + '<div class="muted-sm" style="margin-bottom:12px;font-family:\'JetBrains Mono\',monospace;font-size:11.5px;">Ex: 05/09/2026;08:00;14:00;RPA Suplementar;1204;2;todos</div>'
     + '<div class="field"><label>Vagas (uma por linha)</label><textarea id="lote-textarea" rows="8" placeholder="05/09/2026;08:00;14:00;RPA Suplementar;1204;2;todos" style="width:100%;background:var(--panel-2);border:1px solid var(--border);color:var(--text);padding:10px 12px;border-radius:var(--r-sm);font-family:\'JetBrains Mono\',monospace;font-size:12.5px;margin-top:6px;resize:vertical;"></textarea></div>'
     + '<div id="lote-preview">'+buildLotePreview('').html+'</div>'
