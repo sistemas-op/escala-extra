@@ -618,6 +618,25 @@ function isValidCpfShape(cpf){
   return /^[0-9Xx]{3}\.[0-9Xx]{3}\.[0-9Xx]{3}-[0-9Xx]{2}$/.test((cpf||'').trim());
 }
 
+// Confere os 2 dígitos verificadores do CPF (algoritmo padrão de módulo 11)
+// a partir dos 11 dígitos puros (sem máscara). Rejeita também sequências com
+// os 11 dígitos todos iguais (ex: 111.111.111-11), que passam no cálculo do
+// checksum mas nunca são CPFs reais — usado para endurecer o voluntariado
+// público contra erro de digitação (ver openSignupModal).
+function isValidCpfChecksum(digitos){
+  if(!/^\d{11}$/.test(digitos||'')) return false;
+  if(/^(\d)\1{10}$/.test(digitos)) return false;
+  const calcDigitoVerificador = (base)=>{
+    let soma = 0, peso = base.length + 1;
+    for(let i=0;i<base.length;i++){ soma += Number(base[i]) * peso; peso--; }
+    const resto = soma % 11;
+    return resto < 2 ? 0 : 11 - resto;
+  };
+  if(calcDigitoVerificador(digitos.slice(0,9)) !== Number(digitos[9])) return false;
+  if(calcDigitoVerificador(digitos.slice(0,10)) !== Number(digitos[10])) return false;
+  return true;
+}
+
 // Compara um CPF completo digitado (11 dígitos) com um CPF da escala oficial
 // que pode vir parcialmente mascarado (X no lugar de dígitos ocultos).
 function cpfMatchesMasked(inputDigits, storedCpfRaw){
@@ -704,6 +723,22 @@ function findRankByCpfInEscalaOficial(cpfDigits){
   if(externo && RANK_ORDER.includes(externo.patente)) return externo.patente;
 
   return null;
+}
+
+// Verifica só a EXISTÊNCIA do CPF no cadastro oficial (qualquer período de
+// periodosEscala, qualquer equipe, tolerando CPF mascarado via
+// cpfMatchesMasked; ou policiaisExternos) — sem exigir que a patente seja
+// reconhecida por inferRankFromPatenteTexto. Diferente de
+// findRankByCpfInEscalaOficial, que retorna null tanto para "não encontrado"
+// quanto para "encontrado mas patente não reconhecida" (ex: oficial): aqui
+// os dois casos são distinguidos, porque o voluntariado público só precisa
+// recusar CPF que não existe em lugar nenhum (ver openSignupModal).
+function existsCpfInCadastroOficial(cpfDigits){
+  if(cpfDigits.length !== 11) return false;
+  for(const p of periodosEscala){
+    if(findMembroByCpfInPeriodo(p, cpfDigits)) return true;
+  }
+  return policiaisExternos.some(x=> cpfMatchesMasked(cpfDigits, x.cpf));
 }
 
 // Policiais cuja função contém "suplementar" (ex: "RPA Suplementar") têm
@@ -983,32 +1018,65 @@ function openSignupModal(shiftId){
   const cpfInput = bg.querySelector('#su-cpf');
   const patenteSelectEl = bg.querySelector('#su-patente');
   const patenteNoteEl = bg.querySelector('#su-patente-note');
+  const confirmBtnEl = bg.querySelector('#su-confirm');
 
-  // Reavalia o campo de patente a cada mudança no CPF (input/blur): com CPF
-  // completo (11 dígitos) e encontrado na escala oficial, trava o campo na
-  // patente real cadastrada (anti-fraude); caso contrário, mantém o campo
-  // livre para edição manual. Roda do zero a cada abertura do modal, já que
-  // o <select> é recriado sem estado travado.
+  // Reavalia o campo de patente (e o botão de confirmar) a cada mudança no
+  // CPF (input/blur), nesta ordem:
+  //   1. CPF incompleto: campo livre, sem aviso, confirmar liberado (a
+  //      checagem de 11 dígitos acontece no submit).
+  //   2. CPF com checksum inválido (isValidCpfChecksum): recusa aqui mesmo —
+  //      trava a patente e desativa "Confirmar", já que não dá pra inferir
+  //      nem confirmar nada de um CPF que não existe.
+  //   3. CPF com checksum válido e encontrado na escala oficial
+  //      (findRankByCpfInEscalaOficial): trava a patente na real cadastrada
+  //      (anti-fraude), confirmar liberado.
+  //   4. CPF com checksum válido mas não encontrado em lugar nenhum
+  //      (existsCpfInCadastroOficial): recusa — trava a patente e desativa
+  //      "Confirmar", pra fechar a brecha de alguém digitar um CPF válido ao
+  //      acaso (ou errar os 6 dígitos do meio) e ainda assim conseguir se
+  //      voluntariar.
+  //   5. CPF com checksum válido, encontrado no cadastro, mas com patente que
+  //      inferRankFromPatenteTexto não reconhece (ex: oficial): mantém o
+  //      campo livre pra seleção manual, como já era antes desta trava.
   function reevaluatePatenteFromCpf(){
     const digits = cpfInput.value.replace(/\D/g,'');
     if(digits.length !== 11){
       patenteSelectEl.disabled = false;
       patenteNoteEl.style.display = 'none';
+      confirmBtnEl.disabled = false;
+      return;
+    }
+    if(!isValidCpfChecksum(digits)){
+      patenteSelectEl.disabled = true;
+      confirmBtnEl.disabled = true;
+      patenteNoteEl.textContent = 'CPF inválido. Confira os dígitos.';
+      patenteNoteEl.style.color = 'var(--red)';
+      patenteNoteEl.style.display = '';
       return;
     }
     const rank = findRankByCpfInEscalaOficial(digits);
     if(rank){
       patenteSelectEl.value = rank;
       patenteSelectEl.disabled = true;
+      confirmBtnEl.disabled = false;
       patenteNoteEl.textContent = 'Patente confirmada automaticamente pelo cadastro oficial.';
       patenteNoteEl.style.color = 'var(--green)';
       patenteNoteEl.style.display = '';
-    } else {
-      patenteSelectEl.disabled = false;
-      patenteNoteEl.textContent = 'CPF não localizado no cadastro oficial — patente não verificada automaticamente.';
-      patenteNoteEl.style.color = 'var(--amber)';
-      patenteNoteEl.style.display = '';
+      return;
     }
+    if(!existsCpfInCadastroOficial(digits)){
+      patenteSelectEl.disabled = true;
+      confirmBtnEl.disabled = true;
+      patenteNoteEl.textContent = 'CPF não encontrado. Confira os dígitos ou procure a administração.';
+      patenteNoteEl.style.color = 'var(--red)';
+      patenteNoteEl.style.display = '';
+      return;
+    }
+    patenteSelectEl.disabled = false;
+    confirmBtnEl.disabled = false;
+    patenteNoteEl.textContent = 'CPF localizado no cadastro oficial, mas a patente não pôde ser confirmada automaticamente — selecione manualmente.';
+    patenteNoteEl.style.color = 'var(--amber)';
+    patenteNoteEl.style.display = '';
   }
   cpfInput.oninput = ()=>{ cpfInput.value = maskCpf(cpfInput.value); reevaluatePatenteFromCpf(); };
   cpfInput.onblur = reevaluatePatenteFromCpf;
@@ -1022,6 +1090,12 @@ function openSignupModal(shiftId){
     const cpfDigits = cpfMasked.replace(/\D/g,'');
     if(!nome){ flagInvalid(nomeInput); showToast('Digite seu nome'); return; }
     if(cpfDigits.length !== 11){ flagInvalid(cpfInput); showToast('Digite um CPF válido'); return; }
+    // Revalidado aqui, não só via reevaluatePatenteFromCpf (que já desativa
+    // "Confirmar" nestes dois casos): segunda barreira contra o botão ficar
+    // destravado por uma janela de estado antiga, ou contra um envio
+    // disparado sem passar pelo oninput/onblur do campo de CPF.
+    if(!isValidCpfChecksum(cpfDigits)){ flagInvalid(cpfInput); showToast('CPF inválido. Confira os dígitos.'); return; }
+    if(!existsCpfInCadastroOficial(cpfDigits)){ flagInvalid(cpfInput); showToast('CPF não encontrado. Confira os dígitos ou procure a administração.'); return; }
     const freshShift = shifts.find(x=>x.id===shiftId);
     if(!freshShift){ showToast('Vaga não encontrada'); bg.remove(); return; }
     // Revalida no momento da confirmação, não só na abertura do modal: a
@@ -1167,6 +1241,14 @@ function openAdminAddVoluntarioModal(shiftId){
       patenteSelectEl.disabled = true;
       patenteNoteEl.textContent = 'Patente confirmada automaticamente pelo cadastro oficial.';
       patenteNoteEl.style.color = 'var(--green)';
+      patenteNoteEl.style.display = '';
+    } else if(!isValidCpfChecksum(digits)){
+      // Lançamento administrativo: aviso discreto, sem bloquear — quem está
+      // lançando já presenciou o fato e pode estar digitando um CPF correto
+      // que só não bate no checksum por algum motivo cadastral.
+      patenteSelectEl.disabled = false;
+      patenteNoteEl.textContent = 'Aviso: dígito verificador do CPF não confere — confira antes de salvar.';
+      patenteNoteEl.style.color = 'var(--amber)';
       patenteNoteEl.style.display = '';
     } else {
       patenteSelectEl.disabled = false;
