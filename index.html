@@ -1801,8 +1801,9 @@ function renderAdmin(){
     return;
   }
 
-  let html = '<div class="card" style="display:flex;gap:8px;flex-wrap:wrap;">'
+  let html = '<div class="card" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">'
     + '<button class="btn btn-blue btn-sm" id="demo-btn">Carregar exemplo</button>'
+    + '<input type="month" id="report-month-input" style="max-width:160px;" value="'+defaultReportMonthValue()+'">'
     + '<button class="btn btn-blue btn-sm" id="export-xlsx-btn">Gerar relatório (Excel)</button>'
     + '<button class="btn btn-blue btn-sm" id="export-docx-btn">Gerar relatório (Word)</button>'
     + '<button class="btn btn-blue btn-sm" id="export-historico-btn">Exportar vagas antigas (Word)</button>'
@@ -2914,27 +2915,46 @@ function shiftsToReportBlocks(shiftList){
   });
 }
 
-// Monta, por vaga do MÊS ATUAL (dia 1 ao último dia do mês corrente, passadas
-// e futuras — não usa o mesmo critério "data >= hoje" da tela pública), os
-// dados já no formato do modelo oficial. Mês/ano de hoje e de cada vaga são
-// comparados via parseDateStr (extração numérica direta da string
-// 'YYYY-MM-DD'), sem instanciar Date a partir de hoje para essa comparação —
-// evita qualquer risco de fuso horário deslocar o dia/mês. Cada bloco vira
-// 1+ linhas na tabela final: uma linha por voluntário (mínimo 1, mesmo sem
-// voluntário nenhum, pra vaga aparecer vazia), com Cidade/Dia e Horário/
-// VTR-Setor repetidos apenas na 1ª linha do bloco — as demais colunas dessas
-// ficam mescladas verticalmente por quem consome este array (ver
-// exportEscalaXlsx/exportEscalaDocx).
-function buildEscalaReportBlocks(){
+// Valor padrão (YYYY-MM) do seletor de mês do relatório: o mês corrente,
+// segundo a data local do aparelho (sem instanciar Date em UTC).
+function defaultReportMonthValue(){
   const now = new Date();
-  const anoAtual = now.getFullYear();
-  const mesAtual = now.getMonth() + 1;
-  const doMesAtual = shifts
-    .filter(s=>{ const p=parseDateStr(s && s.date); return p ? (p.y===anoAtual && p.m===mesAtual) : false; })
+  return now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0');
+}
+
+// Monta, por vaga do MÊS/ANO informados (dia 1 ao último dia do mês, passadas
+// e futuras — não usa o mesmo critério "data >= hoje" da tela pública), os
+// dados já no formato do modelo oficial. Mês/ano são comparados via
+// parseDateStr (extração numérica direta da string 'YYYY-MM-DD'), sem
+// instanciar Date a partir de hoje para essa comparação — evita qualquer
+// risco de fuso horário deslocar o dia/mês. Cada bloco vira 1+ linhas na
+// tabela final: uma linha por voluntário (mínimo 1, mesmo sem voluntário
+// nenhum, pra vaga aparecer vazia), com Cidade/Dia e Horário/VTR-Setor
+// repetidos apenas na 1ª linha do bloco — as demais colunas dessas ficam
+// mescladas verticalmente por quem consome este array (ver
+// exportEscalaXlsx/exportEscalaDocx).
+function buildEscalaReportBlocks(anoRef, mesRef){
+  const doMes = shifts
+    .filter(s=>{ const p=parseDateStr(s && s.date); return p ? (p.y===anoRef && p.m===mesRef) : false; })
     .slice()
     .sort((a,b)=> (a.date+a.startTime).localeCompare(b.date+b.startTime));
 
-  return shiftsToReportBlocks(doMesAtual);
+  return shiftsToReportBlocks(doMes);
+}
+
+// Lê e valida o seletor de mês/ano dos relatórios (#report-month-input,
+// formato 'YYYY-MM' do input type="month"). Sem instanciar Date a partir do
+// valor pra evitar deslocamento de fuso horário; extração numérica direta,
+// igual a parseDateStr. Cai no mês corrente se o campo estiver vazio/ausente.
+function getReportMonthRef(){
+  const el = document.getElementById('report-month-input');
+  const val = el && el.value ? el.value : defaultReportMonthValue();
+  const [y, m] = val.split('-').map(Number);
+  if(!Number.isFinite(y) || !Number.isFinite(m) || m < 1 || m > 12){
+    const d = defaultReportMonthValue().split('-').map(Number);
+    return { ano: d[0], mes: d[1] };
+  }
+  return { ano: y, mes: m };
 }
 
 // Mesmo formato de bloco, mas para TODAS as vagas com data anterior a hoje
@@ -2954,7 +2974,9 @@ function buildEscalaHistoricoBlocks(){
 function exportEscalaXlsx(){
   if(!window.XLSX){ showToast('Biblioteca de planilhas não carregou. Recarregue a página.'); return; }
 
-  const blocks = buildEscalaReportBlocks();
+  const { ano, mes } = getReportMonthRef();
+  const blocks = buildEscalaReportBlocks(ano, mes);
+  if(blocks.length === 0){ showToast('Nenhuma vaga cadastrada neste mês.'); return; }
   const rows = [];
   const merges = [];
 
@@ -3008,9 +3030,7 @@ function exportEscalaXlsx(){
   const wb = window.XLSX.utils.book_new();
   window.XLSX.utils.book_append_sheet(wb, ws, 'Escala Extra');
 
-  const today = new Date();
-  const todayStr = today.getFullYear()+'-'+String(today.getMonth()+1).padStart(2,'0')+'-'+String(today.getDate()).padStart(2,'0');
-  window.XLSX.writeFile(wb, 'escala-extra-'+todayStr+'.xlsx');
+  window.XLSX.writeFile(wb, 'escala-extra-'+ano+'-'+String(mes).padStart(2,'0')+'.xlsx');
 }
 
 // ---------- EXPORTAÇÃO DA ESCALA (DOCX) ----------
@@ -3095,9 +3115,11 @@ function todayStrForFilename(){
 
 function exportEscalaDocx(){
   if(!window.docx){ showToast('Biblioteca de geração de Word não carregou. Verifique sua conexão e recarregue a página.'); return; }
-  const blocks = buildEscalaReportBlocks();
+  const { ano, mes } = getReportMonthRef();
+  const blocks = buildEscalaReportBlocks(ano, mes);
+  if(blocks.length === 0){ showToast('Nenhuma vaga cadastrada neste mês.'); return; }
   buildEscalaDocxBlob(blocks)
-    .then(blob=> downloadBlob(blob, 'escala-extra-'+todayStrForFilename()+'.docx'))
+    .then(blob=> downloadBlob(blob, 'escala-extra-'+ano+'-'+String(mes).padStart(2,'0')+'.docx'))
     .catch(e=>{
       console.error('Erro ao gerar o Word:', e);
       showToast('Erro ao gerar o arquivo Word.');
